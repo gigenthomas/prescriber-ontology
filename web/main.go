@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"html/template"
 	"log"
@@ -50,9 +51,20 @@ type queryInfo struct {
 }
 
 func main() {
+	mcpMode := flag.Bool("mcp", false, "Run as a Model Context Protocol stdio server instead of the HTTP chatbot")
+	flag.Parse()
+
 	_ = godotenv.Load(".env")
 	_ = godotenv.Load("../.env")
 
+	if *mcpMode {
+		runMCP()
+		return
+	}
+	runHTTP()
+}
+
+func runHTTP() {
 	ctx := context.Background()
 	if err := initDeps(ctx); err != nil {
 		log.Fatalf("init: %v", err)
@@ -81,13 +93,25 @@ func main() {
 }
 
 func initDeps(ctx context.Context) error {
+	if err := initAnthropic(); err != nil {
+		return err
+	}
+	if err := initPostgres(ctx); err != nil {
+		return err
+	}
+	return initNeo4j(ctx)
+}
+
+func initAnthropic() error {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return errors.New("ANTHROPIC_API_KEY is not set")
 	}
 	anthropicClient = anthropic.NewClient(option.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+	return nil
+}
 
-	pgDSN := pgDSNFromEnv()
-	pool, err := pgxpool.New(ctx, pgDSN)
+func initPostgres(ctx context.Context) error {
+	pool, err := pgxpool.New(ctx, pgDSNFromEnv())
 	if err != nil {
 		return fmt.Errorf("postgres: %w", err)
 	}
@@ -95,7 +119,10 @@ func initDeps(ctx context.Context) error {
 		return fmt.Errorf("postgres ping: %w", err)
 	}
 	pgPool = pool
+	return nil
+}
 
+func initNeo4j(ctx context.Context) error {
 	driver, err := neo4j.NewDriverWithContext(
 		getenv("NEO4J_URI", "bolt://localhost:7687"),
 		neo4j.BasicAuth(

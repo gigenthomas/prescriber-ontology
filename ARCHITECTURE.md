@@ -108,6 +108,48 @@ which the conversation surfaces so the user can verify it.
 
 ---
 
+## The strategic shift: agents as the primary consumer
+
+The chatbot in front of this system is **one consumer**. The actual product is
+the tool surface over the data layer. The same five tools that power the
+chatbot — `list_queries`, `run_query`, `search_entities`, `get_entity`,
+`describe_schema` — can be exposed to any AI agent, internal or third-party.
+
+We are not building a chatbot with a database behind it. We are building a
+**data layer designed to be consumed by AI agents**, with one chatbot as the
+first reference consumer.
+
+### What this gives us
+
+Each property we designed into the platform pays off across many agents, not
+just one:
+
+| Property | Why agents need it |
+|---|---|
+| **Named tools, not raw queries** | A safety boundary that scales — every agent uses the same vetted interface. |
+| **Self-describing schema** (`describe_schema`) | A new agent can learn the data model at runtime instead of being hard-coded. |
+| **Provenance per fact** | Agents can cite sources, which is what makes their answers trustworthy. |
+| **Auditable tool traces** | Every action an agent takes is logged; you can replay what it did and why. |
+
+### Natural next step: expose the tool surface to the agent ecosystem
+
+The dominant industry standard for letting AI agents call external tools is
+the **Model Context Protocol (MCP)**, supported by Claude Desktop, Claude Code,
+and a growing list of agent frameworks. Packaging this tool surface as an MCP
+server is roughly a day of work and immediately unlocks:
+
+- **Claude Desktop users** can ask questions about California prescribers from inside their normal Claude UI, no separate app needed
+- **Internal agents** (for compliance review, market analysis, fraud triage) can use the same tools without each team rebuilding access to the data
+- **Multi-agent workflows** — one agent can call another that calls this data layer, with the audit trail preserved end-to-end
+- **Future agent frameworks** — whatever comes next likely speaks MCP
+
+Strategically, this turns the platform from "an app with a chatbot" into "a
+data layer that exposes itself to the agent ecosystem." The chatbot remains a
+useful reference consumer; the layer itself outlives whichever frontends come
+and go.
+
+---
+
 ## What's in the data today
 
 - **Source:** CMS Medicare Part D Prescribers by Provider and Drug — 2023 release
@@ -141,10 +183,11 @@ Go, Python) and Anthropic's Claude API. No proprietary lock-in.
 
 ## Decisions on the table
 
-1. **Expand data coverage** — Move from California-only to nationwide, add prior years for trend analysis, or add the NPPES registry for organizational affiliations.
-2. **Add payments data** — Layer in CMS Open Payments (pharma-to-prescriber payments) for conflict-of-interest analysis.
-3. **Productionize the chat interface** — Authentication, audit logging, multi-user session isolation, deployment to managed cloud.
-4. **Domain extension** — Apply the same pattern to a different vertical (claims, supply chain, research). The infrastructure is reusable.
+1. **Expose as an MCP server** *(in progress)* — Package the tool surface as a Model Context Protocol server so any compatible AI agent (Claude Desktop, Claude Code, internal agents) can consume the data directly.
+2. **Expand data coverage** — Move from California-only to nationwide, add prior years for trend analysis, or add the NPPES registry for organizational affiliations.
+3. **Add payments data** — Layer in CMS Open Payments (pharma-to-prescriber payments) for conflict-of-interest analysis.
+4. **Productionize the chat interface** — Authentication, audit logging, multi-user session isolation, deployment to managed cloud.
+5. **Domain extension** — Apply the same pattern to a different vertical (claims, supply chain, research). The infrastructure is reusable.
 
 ---
 
