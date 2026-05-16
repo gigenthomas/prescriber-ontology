@@ -49,6 +49,22 @@ metrics:
     description: Mean drug cost per claim across matching prescriptions
     cypher: "sum(toFloat(coalesce(r.tot_drug_cst, 0))) / nullif(sum(toInteger(coalesce(r.tot_clms, 0))), 0)"
 
+  senior_cost:
+    description: Total drug cost driven by beneficiaries 65 and over (GE65_Tot_Drug_Cst)
+    cypher: "sum(toFloat(coalesce(r.ge65_tot_drug_cst, 0)))"
+
+  senior_claims:
+    description: Total prescription claims for beneficiaries 65 and over (GE65_Tot_Clms)
+    cypher: "sum(toInteger(coalesce(r.ge65_tot_clms, 0)))"
+
+  avg_cost_per_beneficiary:
+    description: Mean drug cost per unique beneficiary (rows where Tot_Benes is suppressed contribute 0 to the denominator and the numerator together, so they are effectively dropped)
+    cypher: "sum(toFloat(coalesce(r.tot_drug_cst, 0))) / nullif(sum(toInteger(coalesce(r.tot_benes, 0))), 0)"
+
+  avg_day_supply_per_claim:
+    description: Mean days of medication supplied per claim. Higher values indicate chronic / maintenance therapy; lower values indicate acute / episodic therapy.
+    cypher: "sum(toInteger(coalesce(r.tot_day_suply, 0))) * 1.0 / nullif(sum(toInteger(coalesce(r.tot_clms, 0))), 0)"
+
 dimensions:
   drug:
     description: Brand drug name (Brnd_Name from CMS)
@@ -75,3 +91,20 @@ dimensions:
     extra:
       - "p.external_id AS npi"
       - "p.specialty AS specialty"
+
+  name_length:
+    description: |
+      Demo derived dimension — brand name length bucket ('short' <=6 chars,
+      'medium' <=12, 'long' otherwise). NOT a therapeutic class; useful as
+      a template for how to add derived dimensions with CASE expressions.
+    expression: "CASE WHEN size(d.canonical_label) <= 6 THEN 'short' WHEN size(d.canonical_label) <= 12 THEN 'medium' ELSE 'long' END"
+
+  brand_vs_generic:
+    description: |
+      'generic_only' when the row was billed under the generic substance name,
+      'branded' otherwise. Compares Brnd_Name to Gnrc_Name after lowercasing
+      and normalizing punctuation (CMS uses '-' in Brnd_Name and '/' in
+      Gnrc_Name for combination products). Not perfect — drugs with no
+      generic_of edge in the graph are excluded entirely.
+    match: "(d)-[:generic_of]->(g:GenericDrug)"
+    expression: "CASE WHEN replace(replace(toLower(d.canonical_label), '-', ' '), '/', ' ') = replace(replace(toLower(g.canonical_label), '-', ' '), '/', ' ') THEN 'generic_only' ELSE 'branded' END"
