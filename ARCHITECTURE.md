@@ -89,13 +89,15 @@ If Neo4j is ever lost or corrupted, it can be rebuilt from PostgreSQL in
 ### How the AI assistant stays honest
 
 The LLM is **not** allowed to write its own database queries. Instead it
-chooses from a small set of pre-built, named tools — currently nine of them —
+chooses from a small set of pre-built, named tools — currently seven of them —
 and decides which to call and what parameters to pass.
 
 | Tool | Purpose |
 |------|---------|
-| `list_queries` | Discover what canned questions are available |
-| `run_query` | Execute one of eight named graph queries (ancestors, top prescribers, co-prescribing, etc.) |
+| `list_queries` | Discover what hand-crafted graph queries are available |
+| `run_query` | Execute one of eight named graph queries (top prescribers, co-prescribing, etc.) |
+| `list_metrics` | Discover what declarative metrics and dimensions are available |
+| `query_metric` | Compose a metric × dimension × filters aggregation on the fly |
 | `search_entities` | Fuzzy-match names → exact identifiers |
 | `get_entity` | Fetch one entity with full provenance and neighborhood |
 | `describe_schema` | Show what entity types and relationships exist |
@@ -104,6 +106,64 @@ This is the **safety boundary**. The LLM cannot do anything the platform
 hasn't pre-authorized. There is no SQL injection vector and no risk of an
 expensive runaway query. Every answer is grounded in actual database output,
 which the conversation surfaces so the user can verify it.
+
+---
+
+## The semantic layer: metrics and dimensions
+
+Behind the tool surface sits a single YAML file — [metrics.yaml](metrics.yaml) —
+that declares the platform's vocabulary of **metrics** (what to measure) and
+**dimensions** (how to slice). A small compiler in the application assembles
+these definitions into Cypher at query time.
+
+### Why this layer matters
+
+Before the semantic layer, every new aggregation question (*"top 10 specialties
+by senior spend"*, *"average cost per claim by city"*) required a developer to
+write a new `.cypher` file. Now those questions are composed at runtime from a
+shared vocabulary.
+
+Three concrete consequences:
+
+- **Adding a metric is editing one block of YAML.** No new Go, no new Cypher,
+  no rebuild. Restart the server and the LLM sees it.
+- **Pivot-table thinking.** 13 metrics × 7 dimensions = 91 distinct aggregation
+  shapes the LLM can already compose. Each new metric multiplies into every
+  dimension and vice versa.
+- **One source of truth for definitions.** When compliance, finance, and
+  clinical ops all say *"total spend"*, they are summing the same column the
+  same way — the definition lives in `metrics.yaml` and is reviewable.
+
+### How a request compiles to Cypher
+
+When the LLM calls
+`query_metric(metric="total_cost", group_by="specialty", filters={drug: "Eliquis"})`,
+the compiler:
+
+1. Starts from the **base pattern**:
+   `MATCH (p:Prescriber)-[r:prescribed]->(d:Drug)`
+2. Adds **dimension MATCH clauses** for any referenced dimension that isn't
+   already in the base — e.g. `MATCH (p)-[:has_specialty]->(s:Specialty)`
+3. Adds **filter WHERE clauses** — e.g. `WHERE d.canonical_label = $f_drug`
+4. Emits the **RETURN clause** with the metric expression, the group-by
+   value, and a deterministic ordering
+
+The compiled Cypher is returned to the caller alongside the data, so an analyst
+or auditor can see exactly what ran. There is no hidden translation step.
+
+### What's currently declared
+
+**13 metrics** — `total_cost`, `total_claims`, `total_beneficiaries`,
+`total_30day_fills`, `total_day_supply`, `prescription_count`,
+`unique_prescribers`, `unique_drugs`, `avg_cost_per_claim`, `senior_cost`,
+`senior_claims`, `avg_cost_per_beneficiary`, `avg_day_supply_per_claim`.
+
+**7 dimensions** — `drug`, `generic`, `specialty`, `city`, `prescriber`,
+`name_length` (demo of derived CASE expressions), `brand_vs_generic` (compares
+Brnd_Name to Gnrc_Name with punctuation normalization).
+
+A new metric is typically 3 lines of YAML; a new dimension is 4–6 lines.
+Anyone with read access to the repo can propose one — no programming required.
 
 ---
 
@@ -180,12 +240,17 @@ Go, Python) and Anthropic's Claude API. No proprietary lock-in.
 
 ---
 
+## Already shipped
+
+- **Declarative semantic layer** — 13 metrics × 7 dimensions in `metrics.yaml`, no code required to add more.
+- **MCP server** — the same five-plus-two tool surface is now reachable by any Model Context Protocol client (Claude Desktop, Claude Code, internal agents) by running `prescriber-bot.exe -mcp`.
+
 ## Decisions on the table
 
-1. **Expose as an MCP server** *(in progress)* — Package the tool surface as a Model Context Protocol server so any compatible AI agent (Claude Desktop, Claude Code, internal agents) can consume the data directly.
-2. **Expand data coverage** — Move from California-only to nationwide, add prior years for trend analysis, or add the NPPES registry for organizational affiliations.
-3. **Add payments data** — Layer in CMS Open Payments (pharma-to-prescriber payments) for conflict-of-interest analysis.
-4. **Productionize the chat interface** — Authentication, audit logging, multi-user session isolation, deployment to managed cloud.
+1. **Expand data coverage** — Move from California-only to nationwide, add prior years for trend analysis, or add the NPPES registry for organizational affiliations.
+2. **Add payments data** — Layer in CMS Open Payments (pharma-to-prescriber payments) for conflict-of-interest analysis.
+3. **Productionize the chat interface** — Authentication, audit logging, multi-user session isolation, deployment to managed cloud.
+4. **Semantic entity resolution** — Add `pgvector` embeddings on entity labels so the LLM can find *"the cardiologist who prescribes blood thinners"* without an exact name.
 5. **Domain extension** — Apply the same pattern to a different vertical (claims, supply chain, research). The infrastructure is reusable.
 
 ---
