@@ -1,0 +1,514 @@
+package main
+
+import (
+	"context"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+)
+
+//go:embed templates/*.html
+var templatesFS embed.FS
+
+var (
+	anthropicClient anthropic.Client
+	pgPool          *pgxpool.Pool
+	neoDriver       neo4j.DriverWithContext
+	tpl             *template.Template
+
+	queriesDir = getenv("ONTOLOGY_QUERIES_DIR", "./queries")
+	model      = getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+	queryCatalog  []queryInfo
+	tools         []anthropic.ToolUnionParam
+	systemPrompt  string
+	sessions      sync.Map
+	maxToolRounds = 12
+)
+
+type queryInfo struct {
+	Name        string
+	Description string
+	Params      []string
+}
+
+func main() {
+	_ = godotenv.Load(".env")
+	_ = godotenv.Load("../.env")
+
+	ctx := context.Background()
+	if err := initDeps(ctx); err != nil {
+		log.Fatalf("init: %v", err)
+	}
+	defer pgPool.Close()
+	defer neoDriver.Close(ctx)
+
+	loadQueryCatalog()
+	buildSystemPrompt()
+	buildTools()
+
+	var err error
+	tpl, err = template.ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		log.Fatalf("parse templates: %v", err)
+	}
+
+	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/chat", chatHandler)
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+
+	addr := getenv("ADDR", ":8080")
+	log.Printf("prescriber bot listening on %s (model=%s, queries=%s, %d queries loaded)",
+		addr, model, queriesDir, len(queryCatalog))
+	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+func initDeps(ctx context.Context) error {
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		return errors.New("ANTHROPIC_API_KEY is not set")
+	}
+	anthropicClient = anthropic.NewClient(option.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+
+	pgDSN := pgDSNFromEnv()
+	pool, err := pgxpool.New(ctx, pgDSN)
+	if err != nil {
+		return fmt.Errorf("postgres: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("postgres ping: %w", err)
+	}
+	pgPool = pool
+
+	driver, err := neo4j.NewDriverWithContext(
+		getenv("NEO4J_URI", "bolt://localhost:7687"),
+		neo4j.BasicAuth(
+			getenv("NEO4J_USER", "neo4j"),
+			getenv("NEO4J_PASSWORD", "ontology-dev"),
+			"",
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("neo4j: %w", err)
+	}
+	if err := driver.VerifyConnectivity(ctx); err != nil {
+		return fmt.Errorf("neo4j verify: %w", err)
+	}
+	neoDriver = driver
+	return nil
+}
+
+func pgDSNFromEnv() string {
+	return fmt.Sprintf("postgresql://%s:%s@%s:%s/%s",
+		getenv("POSTGRES_USER", "ontology"),
+		getenv("POSTGRES_PASSWORD", "ontology"),
+		getenv("POSTGRES_HOST", "localhost"),
+		getenv("POSTGRES_PORT", "5432"),
+		getenv("POSTGRES_DB", "ontology"),
+	)
+}
+
+func loadQueryCatalog() {
+	entries, err := os.ReadDir(queriesDir)
+	if err != nil {
+		log.Printf("warn: queries dir %s: %v", queriesDir, err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".cypher") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".cypher")
+		desc, params := parseCypherHeader(filepath.Join(queriesDir, e.Name()))
+		queryCatalog = append(queryCatalog, queryInfo{
+			Name:        name,
+			Description: desc,
+			Params:      params,
+		})
+	}
+	sort.Slice(queryCatalog, func(i, j int) bool { return queryCatalog[i].Name < queryCatalog[j].Name })
+}
+
+var paramRefRe = regexp.MustCompile(`\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// parseCypherHeader returns (description, parameter-names).
+// description is the joined leading `//` comment block. parameters are the distinct
+// `$identifier` references found anywhere in the file body.
+func parseCypherHeader(path string) (string, []string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil
+	}
+	body := string(b)
+
+	var descLines []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			descLines = append(descLines, strings.TrimSpace(strings.TrimPrefix(trimmed, "//")))
+			continue
+		}
+		if trimmed == "" && len(descLines) == 0 {
+			continue
+		}
+		break
+	}
+
+	seen := map[string]struct{}{}
+	var params []string
+	for _, m := range paramRefRe.FindAllStringSubmatch(body, -1) {
+		if _, dup := seen[m[1]]; dup {
+			continue
+		}
+		seen[m[1]] = struct{}{}
+		params = append(params, m[1])
+	}
+	return strings.Join(descLines, " "), params
+}
+
+func buildSystemPrompt() {
+	var b strings.Builder
+	b.WriteString(`You are Prescriber Bot. You answer questions about California's 2023 CMS Medicare Part D prescriber-by-drug data using a hybrid PostgreSQL + Neo4j ontology.
+
+The graph contains:
+- Entity types: Prescriber (NPI), Drug (brand name), GenericDrug, Specialty, Location (city)
+- Relations:
+  - prescribed: Prescriber -> Drug, with attrs tot_clms, tot_30day_fills, tot_day_suply, tot_drug_cst, tot_benes (and ge65_* variants for 65+ beneficiaries)
+  - generic_of: Drug -> GenericDrug
+  - has_specialty: Prescriber -> Specialty
+  - practices_in: Prescriber -> Location
+
+Rules:
+1. NEVER make up numbers. Use the tools to fetch data, then quote those numbers exactly.
+2. Drug and Specialty names in CMS data are case-sensitive (e.g. "Eliquis", "Cardiology"). When unsure of an exact spelling, use search_entities first.
+3. Prefer a named query from the catalog below over ad-hoc reasoning. Use run_query when one fits.
+4. Be concise. Use markdown tables for comparisons. Cite NPIs and dollar amounts directly from tool output.
+5. If a question cannot be answered with available tools, say so plainly.
+
+Available queries (use with run_query). Each query's required parameters are listed in [brackets].
+If a parameter is shown, you MUST pass it in the params map, e.g. run_query(name="drug_top_prescribers", params={"brand": "Eliquis"}).
+
+`)
+	for _, q := range queryCatalog {
+		params := "no params"
+		if len(q.Params) > 0 {
+			params = "params: " + strings.Join(q.Params, ", ")
+		}
+		fmt.Fprintf(&b, "- %s [%s]: %s\n", q.Name, params, q.Description)
+	}
+	b.WriteString(`
+If a tool call returns an error like "Expected parameter(s): X", retry the same query with that parameter included.
+For drug brand names, specialty names, or city names you're unsure of, use search_entities first to find the exact spelling — CMS data is case-sensitive.
+`)
+	systemPrompt = b.String()
+}
+
+func buildTools() {
+	toolParams := []anthropic.ToolParam{
+		{
+			Name:        "list_queries",
+			Description: anthropic.String("List all available named Cypher queries with their descriptions and parameters."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{},
+			},
+		},
+		{
+			Name: "run_query",
+			Description: anthropic.String(
+				"Run a named Cypher query from the catalog against Neo4j. " +
+					"Returns up to 100 rows as a JSON array. Use list_queries to discover names. " +
+					"params is a map of parameter name to value (string or number) as documented in each query's header comment."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"name": map[string]any{
+						"type":        "string",
+						"description": "Query name (e.g. 'top_prescribers_by_claims', 'drug_top_prescribers').",
+					},
+					"params": map[string]any{
+						"type":        "object",
+						"description": "Parameters to pass into the Cypher query. Keys depend on the query.",
+						"additionalProperties": true,
+					},
+				},
+				Required: []string{"name"},
+			},
+		},
+		{
+			Name: "search_entities",
+			Description: anthropic.String(
+				"Fuzzy-search entities by canonical_label using Postgres trigram similarity. " +
+					"Use this to find exact spellings of drug brand names, prescriber names, specialties, or cities. " +
+					"Returns up to 'limit' results with id, type, external_id, canonical_label, similarity score."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"text": map[string]any{
+						"type":        "string",
+						"description": "Search text (case-insensitive).",
+					},
+					"type": map[string]any{
+						"type":        "string",
+						"description": "Optional entity type filter: Prescriber, Drug, GenericDrug, Specialty, Location.",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Max rows (default 10, max 50).",
+					},
+				},
+				Required: []string{"text"},
+			},
+		},
+		{
+			Name: "get_entity",
+			Description: anthropic.String(
+				"Fetch full details for one entity by its external_id and type, including its attrs JSON " +
+					"and direct neighborhood (counts of incoming/outgoing relations per predicate)."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"external_id": map[string]any{
+						"type":        "string",
+						"description": "External identifier (e.g. an NPI for Prescriber, brand name for Drug).",
+					},
+					"type": map[string]any{
+						"type":        "string",
+						"description": "Entity type.",
+					},
+				},
+				Required: []string{"external_id", "type"},
+			},
+		},
+		{
+			Name: "describe_schema",
+			Description: anthropic.String(
+				"Return the controlled vocabulary: registered entity types, predicates, attribute names, and live counts per type."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{},
+			},
+		},
+	}
+
+	tools = make([]anthropic.ToolUnionParam, len(toolParams))
+	for i := range toolParams {
+		tp := toolParams[i]
+		tools[i] = anthropic.ToolUnionParam{OfTool: &tp}
+	}
+}
+
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// ── HTTP handlers ───────────────────────────────────────────────────────────
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	tpl.ExecuteTemplate(w, "index.html", nil)
+}
+
+func chatHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	userMsg := strings.TrimSpace(r.FormValue("message"))
+	if userMsg == "" {
+		http.Error(w, "empty message", http.StatusBadRequest)
+		return
+	}
+
+	sid := sessionID(w, r)
+	history := loadHistory(sid)
+	history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(userMsg)))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	updated, finalText, toolTrace, err := runAgent(ctx, history)
+	if err != nil {
+		log.Printf("agent error: %v", err)
+		renderUser(w, userMsg)
+		renderError(w, err.Error())
+		return
+	}
+	saveHistory(sid, updated)
+
+	renderUser(w, userMsg)
+	for _, t := range toolTrace {
+		renderTool(w, t)
+	}
+	renderBot(w, finalText)
+}
+
+func sessionID(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie("session"); err == nil && c.Value != "" {
+		return c.Value
+	}
+	id := fmt.Sprintf("s%d", time.Now().UnixNano())
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   60 * 60 * 4,
+	})
+	return id
+}
+
+func loadHistory(sid string) []anthropic.MessageParam {
+	if v, ok := sessions.Load(sid); ok {
+		return append([]anthropic.MessageParam{}, v.([]anthropic.MessageParam)...)
+	}
+	return nil
+}
+
+func saveHistory(sid string, h []anthropic.MessageParam) {
+	if len(h) > 40 {
+		h = h[len(h)-40:]
+	}
+	sessions.Store(sid, h)
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+
+var (
+	userTpl  = template.Must(template.New("u").Parse(`<div class="msg user">{{.}}</div>`))
+	botTpl   = template.Must(template.New("b").Parse(`<div class="msg bot">{{.}}</div>`))
+	toolTpl  = template.Must(template.New("t").Parse(`<div class="msg tool">{{.}}</div>`))
+	errorTpl = template.Must(template.New("e").Parse(`<div class="msg error">{{.}}</div>`))
+)
+
+func renderUser(w http.ResponseWriter, s string)  { userTpl.Execute(w, s) }
+func renderBot(w http.ResponseWriter, s string)   { botTpl.Execute(w, s) }
+func renderTool(w http.ResponseWriter, s string)  { toolTpl.Execute(w, s) }
+func renderError(w http.ResponseWriter, s string) { errorTpl.Execute(w, s) }
+
+// ── Agent loop ──────────────────────────────────────────────────────────────
+
+func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthropic.MessageParam, string, []string, error) {
+	var toolTrace []string
+
+	for round := 0; round < maxToolRounds; round++ {
+		resp, err := anthropicClient.Messages.New(ctx, anthropic.MessageNewParams{
+			Model:     anthropic.Model(model),
+			MaxTokens: 4096,
+			System: []anthropic.TextBlockParam{
+				{Text: systemPrompt},
+			},
+			Tools:    tools,
+			Messages: messages,
+		})
+		if err != nil {
+			return messages, "", toolTrace, fmt.Errorf("anthropic: %w", err)
+		}
+
+		messages = append(messages, resp.ToParam())
+
+		var (
+			toolResults []anthropic.ContentBlockParamUnion
+			finalText   strings.Builder
+		)
+
+		for _, block := range resp.Content {
+			switch v := block.AsAny().(type) {
+			case anthropic.TextBlock:
+				if v.Text != "" {
+					finalText.WriteString(v.Text)
+				}
+			case anthropic.ToolUseBlock:
+				inputJSON := string(v.JSON.Input.Raw())
+				toolTrace = append(toolTrace, fmt.Sprintf("→ %s(%s)", v.Name, truncate(inputJSON, 240)))
+				result, isErr := executeTool(ctx, v.Name, inputJSON)
+				toolTrace = append(toolTrace, fmt.Sprintf("← %s", truncate(result, 320)))
+				toolResults = append(toolResults, anthropic.NewToolResultBlock(v.ID, result, isErr))
+			}
+		}
+
+		if len(toolResults) == 0 {
+			return messages, finalText.String(), toolTrace, nil
+		}
+		messages = append(messages, anthropic.NewUserMessage(toolResults...))
+	}
+
+	return messages, "(stopped after max tool rounds)", toolTrace, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// ── Tool dispatch ───────────────────────────────────────────────────────────
+
+func executeTool(ctx context.Context, name, inputJSON string) (string, bool) {
+	out, err := dispatchTool(ctx, name, inputJSON)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err), true
+	}
+	return out, false
+}
+
+func dispatchTool(ctx context.Context, name, inputJSON string) (string, error) {
+	switch name {
+	case "list_queries":
+		return doListQueries()
+	case "describe_schema":
+		return doDescribeSchema(ctx)
+	case "run_query":
+		var in struct {
+			Name   string         `json:"name"`
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		return doRunQuery(ctx, in.Name, in.Params)
+	case "search_entities":
+		var in struct {
+			Text  string `json:"text"`
+			Type  string `json:"type"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		return doSearchEntities(ctx, in.Text, in.Type, in.Limit)
+	case "get_entity":
+		var in struct {
+			ExternalID string `json:"external_id"`
+			Type       string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		return doGetEntity(ctx, in.ExternalID, in.Type)
+	}
+	return "", fmt.Errorf("unknown tool %q", name)
+}

@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets
+.env
+.env.local
+
+# Data downloads and intermediate files
+data/
+*.csv
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Container volumes
+docker/volumes/
+
+# Logs
+*.log
+
+# Build outputs
+*.exe
+prescriber-bot
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+vendor/
