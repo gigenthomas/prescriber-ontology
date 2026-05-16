@@ -73,6 +73,9 @@ func runHTTP() {
 	defer neoDriver.Close(ctx)
 
 	loadQueryCatalog()
+	if err := loadMetrics(); err != nil {
+		log.Fatalf("metrics: %v", err)
+	}
 	buildSystemPrompt()
 	buildTools()
 
@@ -242,6 +245,24 @@ If a parameter is shown, you MUST pass it in the params map, e.g. run_query(name
 	b.WriteString(`
 If a tool call returns an error like "Expected parameter(s): X", retry the same query with that parameter included.
 For drug brand names, specialty names, or city names you're unsure of, use search_entities first to find the exact spelling — CMS data is case-sensitive.
+
+For aggregation questions ("top N by X", "total Y by Z", "average cost per claim grouped by..."), prefer query_metric over run_query. It composes a metric, an optional group_by dimension, and optional filters into a single query.
+
+Available metrics:
+`)
+	for _, n := range metricNames() {
+		fmt.Fprintf(&b, "- %s: %s\n", n, metricCfg.Metrics[n].Description)
+	}
+	b.WriteString("\nAvailable dimensions (use as group_by or filter keys):\n")
+	for _, n := range dimensionNames() {
+		fmt.Fprintf(&b, "- %s: %s\n", n, metricCfg.Dimensions[n].Description)
+	}
+	b.WriteString(`
+Examples:
+- query_metric(metric="total_cost", group_by="specialty", limit=10) -> top 10 specialties by drug cost
+- query_metric(metric="total_claims", group_by="prescriber", filters={"drug":"Eliquis"}, limit=5) -> top 5 prescribers of Eliquis by claims
+- query_metric(metric="unique_drugs", group_by="specialty") -> drug variety per specialty
+- query_metric(metric="total_cost", filters={"city":"SAN FRANCISCO"}) -> total spend in San Francisco (single scalar)
 `)
 	systemPrompt = b.String()
 }
@@ -325,6 +346,43 @@ func buildTools() {
 				"Return the controlled vocabulary: registered entity types, predicates, attribute names, and live counts per type."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{},
+			},
+		},
+		{
+			Name:        "list_metrics",
+			Description: anthropic.String("List available metrics and dimensions for query_metric."),
+			InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
+		},
+		{
+			Name: "query_metric",
+			Description: anthropic.String(
+				"Compute a metric, optionally grouped by a dimension and/or filtered by dimension values. " +
+					"Use list_metrics to see available metrics and dimensions. " +
+					"Returns rows ordered by metric value descending. " +
+					"Examples: " +
+					"query_metric(metric='total_cost', group_by='specialty', limit=10); " +
+					"query_metric(metric='total_claims', group_by='prescriber', filters={'drug':'Eliquis'}, limit=5)."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"metric": map[string]any{
+						"type":        "string",
+						"description": "Metric name from list_metrics (e.g. 'total_cost', 'total_claims').",
+					},
+					"group_by": map[string]any{
+						"type":        "string",
+						"description": "Optional dimension name to group by (e.g. 'specialty', 'drug', 'generic', 'city'). Omit for a single scalar.",
+					},
+					"filters": map[string]any{
+						"type":                 "object",
+						"description":          "Optional filter map: dimension_name -> exact value to match. Values are case-sensitive.",
+						"additionalProperties": map[string]any{"type": "string"},
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Max rows to return (default 25, max 250).",
+					},
+				},
+				Required: []string{"metric"},
 			},
 		},
 	}
@@ -536,6 +594,19 @@ func dispatchTool(ctx context.Context, name, inputJSON string) (string, error) {
 			return "", fmt.Errorf("bad input: %w", err)
 		}
 		return doGetEntity(ctx, in.ExternalID, in.Type)
+	case "list_metrics":
+		return doListMetrics()
+	case "query_metric":
+		var in struct {
+			Metric  string            `json:"metric"`
+			GroupBy string            `json:"group_by"`
+			Filters map[string]string `json:"filters"`
+			Limit   int               `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		return doQueryMetric(ctx, in.Metric, in.GroupBy, in.Filters, in.Limit)
 	}
 	return "", fmt.Errorf("unknown tool %q", name)
 }

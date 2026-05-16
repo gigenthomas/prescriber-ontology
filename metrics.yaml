@@ -1,0 +1,77 @@
+# Declarative semantic layer over the prescriber ontology.
+#
+# Every metric query starts from the `base` pattern, optionally extended with
+# the `match` clauses of any referenced dimensions (group_by + filters).
+# The compiler lives in web/metrics.go.
+#
+# To add a new metric: add an entry under `metrics:` with a Cypher aggregation
+# expression. To add a new dimension: add an entry under `dimensions:` with the
+# expression that produces the group/filter value, plus an optional `match`
+# clause if the dimension's entity isn't already in the base pattern.
+
+base:
+  match: "(p:Prescriber)-[r:prescribed]->(d:Drug)"
+
+metrics:
+  total_cost:
+    description: Total drug cost in dollars across matching prescriptions
+    cypher: "sum(toFloat(coalesce(r.tot_drug_cst, 0)))"
+
+  total_claims:
+    description: Total prescription claims
+    cypher: "sum(toInteger(coalesce(r.tot_clms, 0)))"
+
+  total_beneficiaries:
+    description: Sum of unique beneficiaries (CMS suppresses values < 11; those rows contribute 0)
+    cypher: "sum(toInteger(coalesce(r.tot_benes, 0)))"
+
+  total_30day_fills:
+    description: Total 30-day equivalent fills
+    cypher: "sum(toFloat(coalesce(r.tot_30day_fills, 0)))"
+
+  total_day_supply:
+    description: Total days of medication supplied
+    cypher: "sum(toInteger(coalesce(r.tot_day_suply, 0)))"
+
+  prescription_count:
+    description: Number of (prescriber, drug) rows matched
+    cypher: "count(r)"
+
+  unique_prescribers:
+    description: Number of distinct prescribers
+    cypher: "count(DISTINCT p)"
+
+  unique_drugs:
+    description: Number of distinct drug brands
+    cypher: "count(DISTINCT d)"
+
+  avg_cost_per_claim:
+    description: Mean drug cost per claim across matching prescriptions
+    cypher: "sum(toFloat(coalesce(r.tot_drug_cst, 0))) / nullif(sum(toInteger(coalesce(r.tot_clms, 0))), 0)"
+
+dimensions:
+  drug:
+    description: Brand drug name (Brnd_Name from CMS)
+    expression: "d.canonical_label"
+
+  generic:
+    description: Generic substance (Gnrc_Name from CMS)
+    match: "(d)-[:generic_of]->(g:GenericDrug)"
+    expression: "g.canonical_label"
+
+  specialty:
+    description: Prescriber medical specialty (Prscrbr_Type)
+    match: "(p)-[:has_specialty]->(s:Specialty)"
+    expression: "s.canonical_label"
+
+  city:
+    description: City of practice (composite Location entity)
+    match: "(p)-[:practices_in]->(l:Location)"
+    expression: "l.canonical_label"
+
+  prescriber:
+    description: Individual prescriber (canonical_label is the prescriber's name)
+    expression: "p.canonical_label"
+    extra:
+      - "p.external_id AS npi"
+      - "p.specialty AS specialty"

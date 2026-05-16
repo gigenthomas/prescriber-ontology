@@ -23,6 +23,9 @@ func runMCP() {
 	defer neoDriver.Close(ctx)
 
 	loadQueryCatalog()
+	if err := loadMetrics(); err != nil {
+		log.Fatalf("metrics: %v", err)
+	}
 
 	s := server.NewMCPServer(
 		"prescriber-ontology",
@@ -102,6 +105,36 @@ func runMCP() {
 		mcpGetEntity,
 	)
 
+	s.AddTool(
+		mcp.NewTool("list_metrics",
+			append(readOnly,
+				mcp.WithDescription("List available metrics and dimensions for query_metric."),
+			)...,
+		),
+		mcpListMetrics,
+	)
+
+	s.AddTool(
+		mcp.NewTool("query_metric",
+			append(readOnly,
+				mcp.WithDescription("Compute a metric, optionally grouped by a dimension and/or filtered by dimension values. "+
+					"Use list_metrics to discover available metrics and dimensions. "+
+					"Returns rows ordered by metric value descending, plus the compiled Cypher for transparency."),
+				mcp.WithString("metric",
+					mcp.Required(),
+					mcp.Description("Metric name (e.g. 'total_cost', 'total_claims', 'unique_prescribers').")),
+				mcp.WithString("group_by",
+					mcp.Description("Optional dimension name (e.g. 'specialty', 'drug', 'generic', 'city'). Omit for a single scalar.")),
+				mcp.WithObject("filters",
+					mcp.Description("Optional filter map: dimension_name -> exact value to match. Values are case-sensitive."),
+				),
+				mcp.WithNumber("limit",
+					mcp.Description("Max rows to return (default 25, max 250).")),
+			)...,
+		),
+		mcpQueryMetric,
+	)
+
 	log.Printf("prescriber-ontology MCP server starting (queries=%s, %d queries loaded)",
 		queriesDir, len(queryCatalog))
 	if err := server.ServeStdio(s); err != nil {
@@ -179,6 +212,32 @@ func mcpGetEntity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolRe
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	out, err := doGetEntity(ctx, externalID, entityType)
+	return toolResult(out, err)
+}
+
+func mcpListMetrics(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	out, err := doListMetrics()
+	return toolResult(out, err)
+}
+
+func mcpQueryMetric(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	metric, err := req.RequireString("metric")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	groupBy := req.GetString("group_by", "")
+	limit := req.GetInt("limit", 0)
+
+	filters := map[string]string{}
+	if raw, ok := req.GetArguments()["filters"].(map[string]any); ok {
+		for k, v := range raw {
+			if s, ok := v.(string); ok {
+				filters[k] = s
+			}
+		}
+	}
+
+	out, err := doQueryMetric(ctx, metric, groupBy, filters, limit)
 	return toolResult(out, err)
 }
 

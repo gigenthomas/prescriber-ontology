@@ -8,6 +8,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.43.0
 	github.com/neo4j/neo4j-go-driver/v5 v5.27.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -31,5 +32,4 @@ require (
 	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
