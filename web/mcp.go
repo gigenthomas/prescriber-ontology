@@ -31,56 +31,73 @@ func runMCP() {
 		server.WithInstructions(mcpInstructions()),
 	)
 
+	readOnly := []mcp.ToolOption{
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(true),
+	}
+
 	s.AddTool(
 		mcp.NewTool("list_queries",
-			mcp.WithDescription("List all available named Cypher queries with their descriptions and required parameters."),
+			append(readOnly,
+				mcp.WithDescription("List all available named Cypher queries with their descriptions and required parameters."),
+			)...,
 		),
 		mcpListQueries,
 	)
 
 	s.AddTool(
 		mcp.NewTool("describe_schema",
-			mcp.WithDescription("Return the controlled vocabulary (entity types, predicates, attributes) and live entity/relation counts."),
+			append(readOnly,
+				mcp.WithDescription("Return the controlled vocabulary (entity types, predicates, attributes) and live entity/relation counts."),
+			)...,
 		),
 		mcpDescribeSchema,
 	)
 
 	s.AddTool(
 		mcp.NewTool("run_query",
-			mcp.WithDescription("Run a named Cypher query from the catalog against Neo4j. Returns up to 100 rows as a JSON array. Use list_queries first to discover names and required parameters."),
-			mcp.WithString("name",
-				mcp.Required(),
-				mcp.Description("Query name from the catalog (e.g. 'top_prescribers_by_claims', 'drug_top_prescribers').")),
-			mcp.WithObject("params",
-				mcp.Description("Parameter map. Keys depend on the query — see list_queries for each query's required parameters."),
-			),
+			append(readOnly,
+				mcp.WithDescription("Run a named Cypher query from the catalog against Neo4j. Returns up to 100 rows as a JSON array. Use list_queries first to discover names and required parameters."),
+				mcp.WithString("name",
+					mcp.Required(),
+					mcp.Description("Query name from the catalog (e.g. 'top_prescribers_by_claims', 'drug_top_prescribers').")),
+				mcp.WithObject("params",
+					mcp.Description("Parameter map. Keys depend on the query — see list_queries for each query's required parameters."),
+				),
+			)...,
 		),
 		mcpRunQuery,
 	)
 
 	s.AddTool(
 		mcp.NewTool("search_entities",
-			mcp.WithDescription("Fuzzy-search entities by canonical_label using Postgres trigram similarity. Returns up to 'limit' entries with id, type, external_id, canonical_label, and similarity score. Use this to resolve names to exact identifiers before calling run_query or get_entity."),
-			mcp.WithString("text",
-				mcp.Required(),
-				mcp.Description("Search text (case-insensitive).")),
-			mcp.WithString("type",
-				mcp.Description("Optional entity-type filter: Prescriber, Drug, GenericDrug, Specialty, Location.")),
-			mcp.WithNumber("limit",
-				mcp.Description("Max rows (default 10, max 50).")),
+			append(readOnly,
+				mcp.WithDescription("Fuzzy-search entities by canonical_label using Postgres trigram similarity. Returns up to 'limit' entries with id, type, external_id, canonical_label, and similarity score. Use this to resolve names to exact identifiers before calling run_query or get_entity."),
+				mcp.WithString("text",
+					mcp.Required(),
+					mcp.Description("Search text (case-insensitive).")),
+				mcp.WithString("type",
+					mcp.Description("Optional entity-type filter: Prescriber, Drug, GenericDrug, Specialty, Location.")),
+				mcp.WithNumber("limit",
+					mcp.Description("Max rows (default 10, max 50).")),
+			)...,
 		),
 		mcpSearchEntities,
 	)
 
 	s.AddTool(
 		mcp.NewTool("get_entity",
-			mcp.WithDescription("Fetch full details for one entity by external_id + type, including attrs JSON and direct neighborhood (counts of incoming/outgoing relations per predicate)."),
-			mcp.WithString("external_id",
-				mcp.Required(),
-				mcp.Description("External identifier (NPI for Prescriber, brand name for Drug, etc.).")),
-			mcp.WithString("type",
-				mcp.Required(),
-				mcp.Description("Entity type: Prescriber, Drug, GenericDrug, Specialty, or Location.")),
+			append(readOnly,
+				mcp.WithDescription("Fetch full details for one entity by external_id + type, including attrs JSON and direct neighborhood (counts of incoming/outgoing relations per predicate)."),
+				mcp.WithString("external_id",
+					mcp.Required(),
+					mcp.Description("External identifier (NPI for Prescriber, brand name for Drug, etc.).")),
+				mcp.WithString("type",
+					mcp.Required(),
+					mcp.Description("Entity type: Prescriber, Drug, GenericDrug, Specialty, or Location.")),
+			)...,
 		),
 		mcpGetEntity,
 	)

@@ -1,6 +1,5 @@
 # Prescriber Knowledge Platform — Architecture Brief
 
-**Prepared for:** Executive leadership
 **Date:** 2026-05-16
 **Status:** Working prototype, end-to-end, on real public data
 
