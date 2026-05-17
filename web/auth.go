@@ -45,16 +45,17 @@ type stateMeta struct {
 }
 
 type AuthenticatedUser struct {
-	SessionID    string
-	Subject      string    // sub claim
-	Username     string    // preferred_username
-	Email        string
-	Name         string
-	Roles        []string
-	AccessToken  string
-	IDToken      string
-	RefreshToken string
-	ExpiresAt    time.Time
+	SessionID         string
+	Subject           string    // sub claim
+	Username          string    // preferred_username
+	Email             string
+	Name              string
+	Roles             []string
+	AccessToken       string
+	IDToken           string
+	RefreshToken      string
+	ExpiresAt         time.Time
+	cacheRefreshedAt  time.Time // last time we wrote this user to user_cache
 }
 
 func loadAuthConfig() {
@@ -151,6 +152,8 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/auth/login?return_to="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 			return
 		}
+
+		maybeRefreshUserCache(r.Context(), user)
 
 		ctx := withUser(r.Context(), user)
 		ctx = WithCallContext(ctx, user.Subject, user.SessionID, "http")
@@ -260,6 +263,7 @@ func authCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: oauth2Token.RefreshToken,
 		ExpiresAt:    oauth2Token.Expiry,
 	}
+	user.cacheRefreshedAt = time.Now()
 	sessionStore.Store(sid, user)
 	upsertUserCache(r.Context(), user)
 
@@ -334,6 +338,18 @@ func randomToken(n int) string {
 		return base64.RawURLEncoding.EncodeToString([]byte(time.Now().String()))
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// maybeRefreshUserCache writes the user's identity back to user_cache if
+// it's been more than an hour since the last write. This catches role
+// changes made in Keycloak after the session started without forcing a
+// re-login. Lazy: noop if the cache was touched recently.
+func maybeRefreshUserCache(ctx context.Context, u *AuthenticatedUser) {
+	if u == nil || time.Since(u.cacheRefreshedAt) < time.Hour {
+		return
+	}
+	u.cacheRefreshedAt = time.Now()
+	upsertUserCache(ctx, u)
 }
 
 // upsertUserCache mirrors the latest user identity to the user_cache table

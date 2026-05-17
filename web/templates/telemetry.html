@@ -168,8 +168,7 @@
       <label for="actor">Actor:</label>
       <select name="actor" id="actor">
         <option value="">all</option>
-        <option value="agent:claude" {{if eq "agent:claude" .Filter.Actor}}selected{{end}}>agent:claude</option>
-        <option value="agent:mcp"    {{if eq "agent:mcp" .Filter.Actor}}selected{{end}}>agent:mcp</option>
+        {{range .Actors}}<option value="{{.Value}}" {{if eq .Value $.Filter.Actor}}selected{{end}}>{{.Label}}</option>{{end}}
       </select>
 
       <button type="submit">Apply</button>
@@ -196,7 +195,7 @@
         <tr>
           <td class="when">{{.When}}</td>
           <td><code>{{.Tool}}</code></td>
-          <td>{{.Actor}}</td>
+          <td>{{.ActorDisplay}}</td>
           <td>{{.Transport}}</td>
           <td class="r">{{.DurationMs}} ms</td>
           <td class="r">{{.ResultSize}}</td>

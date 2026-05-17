@@ -34,17 +34,18 @@ type actionsFilter struct {
 }
 
 type invocationRow struct {
-	ID          string
-	When        string
-	Action      string
-	TargetType  string
-	TargetID    string
-	TargetLabel string
-	ParamsJSON  string
-	StateJSON   string
-	Actor       string
-	Status      string
-	Error       string
+	ID           string
+	When         string
+	Action       string
+	TargetType   string
+	TargetID     string
+	TargetLabel  string
+	ParamsJSON   string
+	StateJSON    string
+	Actor        string
+	ActorDisplay string
+	Status       string
+	Error        string
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────────
@@ -123,11 +124,13 @@ func loadInvocationRows(ctx context.Context, f actionsFilter, limit int) ([]invo
             ai.params::text,
             COALESCE(es.state::text, '{}'),
             ai.actor,
+            ` + actorDisplayExpr("ai") + ` AS actor_display,
             ai.status,
             COALESCE(ai.error_msg, '')
         FROM action_invocation ai
         LEFT JOIN entity e ON e.id = ai.target_entity_id
         LEFT JOIN entity_state es ON es.entity_id = ai.target_entity_id
+        LEFT JOIN user_cache uc ON uc.subject::text = ai.actor
         WHERE 1=1`)
 
 	var args []any
@@ -172,7 +175,7 @@ func loadInvocationRows(ctx context.Context, f actionsFilter, limit int) ([]invo
 		var stateStr string
 		if err := rows.Scan(
 			&r.ID, &invoked, &r.Action, &r.TargetType, &r.TargetID, &r.TargetLabel,
-			&r.ParamsJSON, &stateStr, &r.Actor, &r.Status, &errMsg,
+			&r.ParamsJSON, &stateStr, &r.Actor, &r.ActorDisplay, &r.Status, &errMsg,
 		); err != nil {
 			return nil, err
 		}
