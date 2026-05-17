@@ -326,18 +326,26 @@ func buildTools() {
 		{
 			Name: "search_entities",
 			Description: anthropic.String(
-				"Fuzzy-search entities by canonical_label using Postgres trigram similarity. " +
-					"Use this to find exact spellings of drug brand names, prescriber names, specialties, or cities. " +
-					"Returns up to 'limit' results with id, type, external_id, canonical_label, similarity score."),
+				"Find entities by name or concept. Two modes:\n" +
+					"  mode='trigram' (default) — Postgres trigram similarity on canonical_label. " +
+					"Best for known spellings of drug brand names, prescriber names, specialties, or cities (e.g. 'Eliquis').\n" +
+					"  mode='semantic' — OpenAI embedding cosine distance. " +
+					"Best for conceptual searches (e.g. 'blood thinner', 'heart specialist in San Francisco') where the exact name isn't known.\n" +
+					"Returns up to 'limit' results with type, external_id, canonical_label, and a similarity score."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"text": map[string]any{
 						"type":        "string",
-						"description": "Search text (case-insensitive).",
+						"description": "Search text. For semantic mode, can be a natural-language description.",
 					},
 					"type": map[string]any{
 						"type":        "string",
 						"description": "Optional entity type filter: Prescriber, Drug, GenericDrug, Specialty, Location.",
+					},
+					"mode": map[string]any{
+						"type":        "string",
+						"description": "'trigram' (default) for exact-substring fuzzy match, 'semantic' for embedding-based conceptual match.",
+						"enum":        []string{"trigram", "semantic"},
 					},
 					"limit": map[string]any{
 						"type":        "integer",
@@ -682,10 +690,14 @@ func dispatchTool(ctx context.Context, name, inputJSON string) (string, error) {
 		var in struct {
 			Text  string `json:"text"`
 			Type  string `json:"type"`
+			Mode  string `json:"mode"`
 			Limit int    `json:"limit"`
 		}
 		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
 			return "", fmt.Errorf("bad input: %w", err)
+		}
+		if in.Mode == "semantic" {
+			return doSemanticSearch(ctx, in.Text, in.Type, in.Limit)
 		}
 		return doSearchEntities(ctx, in.Text, in.Type, in.Limit)
 	case "get_entity":

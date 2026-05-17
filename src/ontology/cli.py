@@ -2,6 +2,11 @@ import json
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
+
+# Load .env into the process environment so libraries that read os.environ
+# directly (e.g., OpenAI) see the keys even when invoked via the CLI.
+load_dotenv()
 
 from ontology.config import settings
 from ontology.db import close_all, neo4j_driver, pg_conn
@@ -152,6 +157,30 @@ def query(
         typer.echo(json.dumps(row, default=str))
     if len(rows) > limit:
         typer.echo(f"... ({len(rows) - limit} more)")
+
+
+@app.command()
+def embed(
+    force: bool = typer.Option(False, "--force", help="Re-embed every entity, even those that already have an embedding"),
+    limit: int | None = typer.Option(None, "--limit", help="Embed at most N entities (useful for spot-tests)"),
+) -> None:
+    """Compute OpenAI embeddings for entities and store in entity.embedding.
+
+    Requires OPENAI_API_KEY in .env or environment. Idempotent — by default only
+    processes entities where embedding IS NULL.
+    """
+    from ontology.embeddings import backfill, stats
+
+    typer.echo("before:")
+    for s in stats():
+        typer.echo(f"  {s['type']:<15} total={s['total']:>7,} embedded={s['embedded']:>7,} pending={s['pending']:>7,}")
+
+    n = backfill(force=force, limit=limit)
+    typer.echo(f"embedded {n:,} entities")
+
+    typer.echo("after:")
+    for s in stats():
+        typer.echo(f"  {s['type']:<15} total={s['total']:>7,} embedded={s['embedded']:>7,} pending={s['pending']:>7,}")
 
 
 if __name__ == "__main__":

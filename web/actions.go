@@ -173,12 +173,14 @@ func substituteValue(v any, params map[string]any) any {
 // ── Executor ────────────────────────────────────────────────────────────────
 
 type actionResult struct {
-	InvocationID string         `json:"invocation_id"`
-	Action       string         `json:"action"`
-	Target       string         `json:"target"`
-	Params       map[string]any `json:"params"`
-	StateUpdates map[string]any `json:"state_updates,omitempty"`
-	Status       string         `json:"status"`
+	InvocationID    string         `json:"invocation_id"`
+	Action          string         `json:"action"`
+	Target          string         `json:"target"`
+	Params          map[string]any `json:"params"`
+	StateUpdates    map[string]any `json:"state_updates,omitempty"`
+	Status          string         `json:"status"`
+	IdempotencyKey  string         `json:"idempotency_key,omitempty"`
+	IdempotentReplay bool          `json:"idempotent_replay,omitempty"` // true when this is a replay of a prior result
 }
 
 func executeAction(
@@ -192,6 +194,12 @@ func executeAction(
 		return "", fmt.Errorf("unknown action %q", actionName)
 	}
 
+	// Pull (and strip) the idempotency_key BEFORE validation — it's a
+	// reserved param, not declared in actions.yaml. Validators would reject
+	// it as an unknown param otherwise.
+	idempotencyKey, _ := input["idempotency_key"].(string)
+	delete(input, "idempotency_key")
+
 	// Resolve target type — either fixed by the action, or supplied via hidden _target_type.
 	targetType := def.TargetType
 	if targetType == "any" {
@@ -201,6 +209,19 @@ func executeAction(
 		}
 		targetType = t
 		delete(input, "_target_type")
+	}
+
+	// Idempotency replay — if this key has been seen, return the prior result
+	// without re-applying. This is the agent-retry safety net.
+	if idempotencyKey != "" {
+		prior, found, err := lookupPriorInvocation(ctx, idempotencyKey)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			prior.IdempotentReplay = true
+			return marshal(prior)
+		}
 	}
 
 	// Resolve target entity.
@@ -234,12 +255,23 @@ func executeAction(
 	var invocationID string
 	err = tx.QueryRow(ctx, `
         INSERT INTO action_invocation
-            (action_name, target_entity_id, target_type, target_external_id, params, actor, session_id, status)
-        VALUES ($1, $2::uuid, $3, $4, $5::jsonb, $6, NULLIF($7, ''), 'applied')
+            (action_name, target_entity_id, target_type, target_external_id,
+             params, actor, session_id, status, idempotency_key)
+        VALUES ($1, $2::uuid, $3, $4, $5::jsonb, $6, NULLIF($7, ''), 'applied', NULLIF($8, '')::uuid)
         RETURNING id::text`,
-		actionName, entityID, targetType, externalID, string(paramsJSON), actor, sessionID,
+		actionName, entityID, targetType, externalID, string(paramsJSON), actor, sessionID, idempotencyKey,
 	).Scan(&invocationID)
 	if err != nil {
+		// If it's a unique-violation on idempotency_key, someone slipped a key
+		// between our pre-check and the INSERT. Look it up and return the
+		// prior result — that's the idempotent semantic.
+		if idempotencyKey != "" {
+			prior, found, lookupErr := lookupPriorInvocation(ctx, idempotencyKey)
+			if lookupErr == nil && found {
+				prior.IdempotentReplay = true
+				return marshal(prior)
+			}
+		}
 		return "", fmt.Errorf("insert invocation: %w", err)
 	}
 
@@ -263,13 +295,55 @@ func executeAction(
 	}
 
 	return marshal(actionResult{
-		InvocationID: invocationID,
-		Action:       actionName,
-		Target:       fmt.Sprintf("%s:%s (%s)", targetType, externalID, canonicalLabel),
-		Params:       resolvedParams,
-		StateUpdates: stateUpdates,
-		Status:       "applied",
+		InvocationID:   invocationID,
+		Action:         actionName,
+		Target:         fmt.Sprintf("%s:%s (%s)", targetType, externalID, canonicalLabel),
+		Params:         resolvedParams,
+		StateUpdates:   stateUpdates,
+		Status:         "applied",
+		IdempotencyKey: idempotencyKey,
 	})
+}
+
+// lookupPriorInvocation finds an action_invocation row by idempotency_key
+// and rebuilds the result envelope so a retry returns the same shape.
+func lookupPriorInvocation(ctx context.Context, key string) (actionResult, bool, error) {
+	var (
+		r          actionResult
+		paramsJSON string
+		targetType string
+		extID      string
+		entityID   string
+		stateJSON  sql.NullString
+		label      sql.NullString
+	)
+	err := pgPool.QueryRow(ctx, `
+        SELECT ai.id::text, ai.action_name,
+               COALESCE(ai.target_entity_id::text, ''),
+               ai.target_type, ai.target_external_id,
+               ai.params::text, ai.status,
+               e.canonical_label,
+               es.state::text
+        FROM action_invocation ai
+        LEFT JOIN entity       e  ON e.id  = ai.target_entity_id
+        LEFT JOIN entity_state es ON es.entity_id = ai.target_entity_id
+        WHERE ai.idempotency_key = $1::uuid`,
+		key,
+	).Scan(&r.InvocationID, &r.Action, &entityID, &targetType, &extID, &paramsJSON, &r.Status, &label, &stateJSON)
+	if err != nil {
+		return actionResult{}, false, nil
+	}
+	_ = json.Unmarshal([]byte(paramsJSON), &r.Params)
+	if stateJSON.Valid {
+		_ = json.Unmarshal([]byte(stateJSON.String), &r.StateUpdates)
+	}
+	labelStr := ""
+	if label.Valid {
+		labelStr = label.String
+	}
+	r.Target = fmt.Sprintf("%s:%s (%s)", targetType, extID, labelStr)
+	r.IdempotencyKey = key
+	return r, true, nil
 }
 
 func recordRejection(
@@ -399,6 +473,11 @@ func buildOneActionTool(name string, def actionDef) anthropic.ToolParam {
 			"description": fmt.Sprintf(
 				"External identifier of the target entity (NPI for Prescriber, brand name for Drug, etc.). Type=%s.",
 				def.TargetType),
+		},
+		"idempotency_key": map[string]any{
+			"type": "string",
+			"description": "Optional UUID. If you may retry this action (network blip, timeout), generate a fresh UUID and pass it here. The same key will return the prior result instead of re-applying.",
+			"format": "uuid",
 		},
 	}
 	required := []string{"external_id"}

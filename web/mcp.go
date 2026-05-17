@@ -87,12 +87,15 @@ func runMCP() {
 	s.AddTool(
 		mcp.NewTool("search_entities",
 			append(readOnly,
-				mcp.WithDescription("Fuzzy-search entities by canonical_label using Postgres trigram similarity. Returns up to 'limit' entries with id, type, external_id, canonical_label, and similarity score. Use this to resolve names to exact identifiers before calling run_query or get_entity."),
+				mcp.WithDescription("Find entities by name or concept. Two modes: 'trigram' (default) for substring-fuzzy match on canonical_label, best for known spellings; 'semantic' for embedding-based conceptual match, best when the exact name isn't known (e.g. 'blood thinner' will surface anticoagulants)."),
 				mcp.WithString("text",
 					mcp.Required(),
-					mcp.Description("Search text (case-insensitive).")),
+					mcp.Description("Search text. For semantic mode, can be a natural-language description.")),
 				mcp.WithString("type",
 					mcp.Description("Optional entity-type filter: Prescriber, Drug, GenericDrug, Specialty, Location.")),
+				mcp.WithString("mode",
+					mcp.Enum("trigram", "semantic"),
+					mcp.Description("'trigram' (default) or 'semantic'.")),
 				mcp.WithNumber("limit",
 					mcp.Description("Max rows (default 10, max 50).")),
 			)...,
@@ -248,6 +251,9 @@ func buildMCPActionTool(name string, def actionDef, baseOpts []mcp.ToolOption) m
 		mcp.Description(fmt.Sprintf(
 			"External identifier of the target entity (NPI for Prescriber, brand name for Drug, etc.). Type=%s.",
 			def.TargetType))))
+
+	opts = append(opts, mcp.WithString("idempotency_key",
+		mcp.Description("Optional UUID. If you may retry this action (network blip, timeout), generate a fresh UUID and pass it here. The same key returns the prior result instead of re-applying.")))
 
 	if def.TargetType == "any" {
 		opts = append(opts, mcp.WithString("target_type",
