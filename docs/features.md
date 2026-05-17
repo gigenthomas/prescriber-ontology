@@ -166,6 +166,41 @@ enables. Group order roughly reflects build order.
 
 **Honest scope:** events written *before* migration 0005 show `(unattributed)` in the caused_by column — the attribution is for events going forward. Column-level lineage (within an attribute) is *not* tracked; row-level (per-entity) is.
 
+## 14 · Semantic entity resolution (pgvector)
+
+| Feature | Where | What it enables |
+|---|---|---|
+| pgvector extension + vector column | [db/postgres/migrations/0006_pgvector.sql](../db/postgres/migrations/0006_pgvector.sql) | `entity.embedding vector(1536)` + `embedding_text` + `embedding_model` columns; HNSW index on cosine distance; partial index for incremental backfill |
+| pgvector-bundled Postgres image | [docker-compose.yml](../docker-compose.yml) | Image swap from `postgres:16` to `pgvector/pgvector:pg16` (data preserved via volume) |
+| Python embedding pipeline | [src/ontology/embeddings.py](../src/ontology/embeddings.py) | Builds per-entity text (type + canonical_label + key attrs; Drugs get their generic substance joined in), batched OpenAI text-embedding-3-small calls, UPDATE writes vector + audit text back to entity |
+| `ontology embed` CLI | [src/ontology/cli.py](../src/ontology/cli.py) | Idempotent backfill (`--force` re-embeds everything, `--limit N` spot-tests); auto-loads `.env` via python-dotenv so OPENAI_API_KEY flows to child processes |
+| Server-side query embedding | [web/embeddings.go](../web/embeddings.go) | Direct HTTP call to OpenAI embedding endpoint (no Go SDK dep needed); ~10 ms per query |
+| Semantic search query | [web/embeddings.go](../web/embeddings.go) `doSemanticSearch` | `ORDER BY embedding <=> $1::vector` returns nearest neighbors with cosine distance + similarity score |
+| `search_entities` mode parameter | [web/main.go](../web/main.go) + [web/mcp.go](../web/mcp.go) | LLM picks `mode='trigram'` (default — known spelling) or `mode='semantic'` (concept). Same tool name, two retrieval engines. |
+
+**Answerable for the first time:**
+- *"Find drugs that act as blood thinners"* → semantic mode surfaces Eliquis, Xarelto, Warfarin even though the string "blood thinner" appears nowhere in the data
+- *"The cardiologist in San Francisco who prescribes statins"* → semantic mode resolves "cardiologist" to the Specialty entity even when typed informally
+- *"Find drugs similar to Lipitor"* → embed Lipitor's text, find nearest neighbors → returns other statins (semantically similar)
+
+**Operational cost:**
+- One-time backfill: $0.05–$0.15 for 114k entities at OpenAI's text-embedding-3-small pricing ($0.02/1M tokens)
+- Per chat query: negligible (~$0.000004 — a single API call per `search_entities` call)
+- Requires `OPENAI_API_KEY` in `.env`
+
+## 15 · Action idempotency keys
+
+| Feature | Where | What it enables |
+|---|---|---|
+| `idempotency_key` column | [db/postgres/migrations/0007_idempotency.sql](../db/postgres/migrations/0007_idempotency.sql) | Optional UUID on `action_invocation` with a partial unique index (NULL allowed many times) |
+| Executor replay check | [web/actions.go](../web/actions.go) `executeAction` + `lookupPriorInvocation` | If a caller supplies a key that's been seen, return the prior `actionResult` with `idempotent_replay: true` and DO NOT re-apply state |
+| Race-safe insert | (same) | On unique-violation race (two callers slip the same key between the pre-check and the INSERT), catches the conflict and returns the prior result anyway |
+| Tool-surface exposure | [web/actions.go](../web/actions.go) + [web/mcp.go](../web/mcp.go) | Every auto-generated `action_*` tool gains an optional `idempotency_key` string parameter (format: uuid) |
+
+**Why agents need this:** at-least-once retry behavior on transient failures (network blip, timeout, rate limit) means the same conceptual action gets applied twice without an idempotency key. With the key, the second invocation finds the prior row and returns the same `invocation_id` rather than creating a new audit row and re-applying state.
+
+**Smoke-tested:** same key + same params → identical `invocation_id`, `idempotent_replay: true`, no new `action_invocation` row in Postgres. No key → fresh invocation every call (previous behavior preserved).
+
 ---
 
 ## What's planned but not built
@@ -173,8 +208,6 @@ enables. Group order roughly reflects build order.
 | Plan | Doc | Status |
 |---|---|---|
 | Eval harness for LLM answer quality | (no plan doc yet) | Recommended |
-| `pgvector` semantic entity resolution | (no plan doc yet) | Recommended |
-| Idempotency keys on actions | (no plan doc yet) | Recommended |
 | Batch action invocation | (no plan doc yet) | Recommended |
 | `describe_capability` macro tool | (no plan doc yet) | Recommended |
 | Hot-reload of metrics.yaml / actions.yaml | (no plan doc yet) | Recommended |
@@ -188,6 +221,8 @@ enables. Group order roughly reflects build order.
 | Action rate limiting per actor | (composes with §12) | Recommended — token bucket keyed off `tool_call_log.actor` |
 | Column-level lineage (within an attribute) | (composes with §13) | Future — current lineage is row/entity-level only |
 | Backfill attribution for pre-0005 events | (composes with §13) | Won't fix — events from before today are honestly `(unattributed)` |
+| Hybrid trigram + semantic ranking | (composes with §14) | Future — blend cosine and trigram scores into a single ranking |
+| Re-embed on entity attribute change | (composes with §14) | Future — currently embeddings are computed once; if `attrs` change, the embedding drifts |
 | Bulk-load trigger bypass on ETL | [events-plan.md](events-plan.md) | Partial — plan documented, Python helper not yet wired |
 | Kafka transport migration | [events-plan.md](events-plan.md) | Plan only — flip when at least two of the trigger criteria become true |
 
@@ -202,4 +237,7 @@ enables. Group order roughly reflects build order.
 - **~3,778** prompt-cached tokens per call after the first; ~10× cheaper on the cached portion
 - **Postgres → Neo4j auto-sync latency: ~1 second** (LISTEN/NOTIFY wake-up + drain)
 - **Every** LLM tool dispatch — chatbot and MCP, read and write — is captured in `tool_call_log` with full timing, params, status, result size
+- **Every** change to entity / relation / entity_state going forward is attributable to a pipeline_run or an action_invocation
+- **1,536-dim** OpenAI embeddings per entity, HNSW-indexed for cosine similarity search — ~$0.10 to backfill 114k entities
+- **Every action** can be retried safely by passing an optional `idempotency_key` UUID
 - **Every** change to entity / relation / entity_state going forward is attributable to a pipeline_run or an action_invocation
