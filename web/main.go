@@ -76,6 +76,9 @@ func runHTTP() {
 	if err := loadMetrics(); err != nil {
 		log.Fatalf("metrics: %v", err)
 	}
+	if err := loadActions(); err != nil {
+		log.Fatalf("actions: %v", err)
+	}
 	buildSystemPrompt()
 	buildTools()
 
@@ -263,7 +266,23 @@ Examples:
 - query_metric(metric="total_claims", group_by="prescriber", filters={"drug":"Eliquis"}, limit=5) -> top 5 prescribers of Eliquis by claims
 - query_metric(metric="unique_drugs", group_by="specialty") -> drug variety per specialty
 - query_metric(metric="total_cost", filters={"city":"SAN FRANCISCO"}) -> total spend in San Francisco (single scalar)
+
 `)
+	if len(actionCfg.Actions) > 0 {
+		b.WriteString("Write-back actions available (each is its own tool named action_<name>):\n")
+		for _, n := range actionNames() {
+			d := actionCfg.Actions[n]
+			b.WriteString(fmt.Sprintf("- action_%s (target=%s): %s\n", n, d.TargetType, strings.SplitN(d.Description, "\n", 2)[0]))
+		}
+		b.WriteString(`
+When applying a consequential action (flag, watchlist, etc.):
+1. Resolve the target with search_entities to confirm the exact external_id.
+2. State your reasoning in the response BEFORE invoking the action.
+3. After the action returns, summarize what was applied including the invocation_id.
+4. Use entity_actions(external_id, type) to inspect prior history if relevant.
+Use list_actions for the full parameter schema of any action.
+`)
+	}
 	systemPrompt = b.String()
 }
 
@@ -385,6 +404,38 @@ func buildTools() {
 				Required: []string{"metric"},
 			},
 		},
+		{
+			Name:        "list_actions",
+			Description: anthropic.String("List available actions (write-back operations) with their parameter schemas and target types. Each action becomes its own tool named 'action_<name>'."),
+			InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
+		},
+		{
+			Name: "entity_actions",
+			Description: anthropic.String(
+				"Return the recent action-invocation history for one entity, plus its current entity_state. " +
+					"Use to inspect what's been done to an entity and the resulting state."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"external_id": map[string]any{
+						"type":        "string",
+						"description": "External identifier (NPI for Prescriber, brand name for Drug, etc.).",
+					},
+					"type": map[string]any{
+						"type":        "string",
+						"description": "Entity type.",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Max invocations to return (default 25, max 100).",
+					},
+				},
+				Required: []string{"external_id", "type"},
+			},
+		},
+	}
+
+	for _, t := range buildActionTools() {
+		toolParams = append(toolParams, t)
 	}
 
 	tools = make([]anthropic.ToolUnionParam, len(toolParams))
@@ -607,6 +658,34 @@ func dispatchTool(ctx context.Context, name, inputJSON string) (string, error) {
 			return "", fmt.Errorf("bad input: %w", err)
 		}
 		return doQueryMetric(ctx, in.Metric, in.GroupBy, in.Filters, in.Limit)
+	case "list_actions":
+		return doListActions()
+	case "entity_actions":
+		var in struct {
+			ExternalID string `json:"external_id"`
+			Type       string `json:"type"`
+			Limit      int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		return doEntityActions(ctx, in.ExternalID, in.Type, in.Limit)
 	}
+
+	if strings.HasPrefix(name, "action_") {
+		actionName := strings.TrimPrefix(name, "action_")
+		var in map[string]any
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		externalID, _ := in["external_id"].(string)
+		delete(in, "external_id")
+		if tt, ok := in["target_type"].(string); ok {
+			in["_target_type"] = tt
+			delete(in, "target_type")
+		}
+		return executeAction(ctx, actionName, externalID, in, "agent:claude", "")
+	}
+
 	return "", fmt.Errorf("unknown tool %q", name)
 }

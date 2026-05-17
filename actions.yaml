@@ -1,0 +1,64 @@
+# Declarative action definitions for the prescriber ontology.
+#
+# Each action is a typed operation with a target entity (or class of entities),
+# parameters, and effects. The compiler in web/actions.go auto-generates an
+# Anthropic / MCP tool per action.
+#
+# Edit and restart the chatbot/MCP server to pick up changes — no rebuild.
+#
+# Param substitution: "$paramName" in state_updates is replaced with the
+# caller-supplied value before the update is applied.
+
+actions:
+  flag_for_review:
+    description: Flag a prescriber for compliance review with a reason and severity.
+    target_type: Prescriber
+    params:
+      reason:
+        type: string
+        required: true
+        description: Short explanation of why this prescriber is being flagged.
+      severity:
+        type: enum
+        values: [low, medium, high]
+        default: medium
+        description: Severity of the flag.
+    state_updates:
+      flagged: true
+      flag_reason: "$reason"
+      flag_severity: "$severity"
+
+  unflag:
+    description: Clear the review flag from a prescriber.
+    target_type: Prescriber
+    state_updates:
+      flagged: false
+      flag_reason: null
+      flag_severity: null
+
+  add_to_watchlist:
+    description: |
+      Add a drug to a named watchlist. Watchlists are advisory tags that
+      downstream tools (alerts, dashboards) can filter on.
+    target_type: Drug
+    params:
+      list_name:
+        type: enum
+        values: [cost_watch, controlled_substance, off_label]
+        required: true
+        description: Which watchlist to add the drug to.
+    state_updates:
+      watchlist: "$list_name"
+
+  add_note:
+    description: |
+      Attach a free-text note to any entity. Recorded in the audit log only —
+      does not change entity state. Useful for case notes, observations,
+      manual review markers.
+    target_type: any
+    params:
+      note:
+        type: string
+        required: true
+        description: The note text.
+    state_updates: {}

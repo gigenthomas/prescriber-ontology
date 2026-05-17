@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 
@@ -25,6 +26,9 @@ func runMCP() {
 	loadQueryCatalog()
 	if err := loadMetrics(); err != nil {
 		log.Fatalf("metrics: %v", err)
+	}
+	if err := loadActions(); err != nil {
+		log.Fatalf("actions: %v", err)
 	}
 
 	s := server.NewMCPServer(
@@ -135,6 +139,43 @@ func runMCP() {
 		mcpQueryMetric,
 	)
 
+	// ── Actions (write-back) ──
+	writeAction := []mcp.ToolOption{
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+	}
+
+	s.AddTool(
+		mcp.NewTool("list_actions",
+			append(readOnly,
+				mcp.WithDescription("List available actions (write-back operations). Each action is also a tool named 'action_<name>'."),
+			)...,
+		),
+		mcpListActions,
+	)
+
+	s.AddTool(
+		mcp.NewTool("entity_actions",
+			append(readOnly,
+				mcp.WithDescription("Return the recent action-invocation history for one entity plus its current entity_state."),
+				mcp.WithString("external_id", mcp.Required(),
+					mcp.Description("External identifier (NPI, brand name, etc.).")),
+				mcp.WithString("type", mcp.Required(),
+					mcp.Description("Entity type.")),
+				mcp.WithNumber("limit",
+					mcp.Description("Max invocations to return (default 25, max 100).")),
+			)...,
+		),
+		mcpEntityActions,
+	)
+
+	for _, name := range actionNames() {
+		def := actionCfg.Actions[name]
+		s.AddTool(buildMCPActionTool(name, def, writeAction), mcpRunAction(name))
+	}
+
 	log.Printf("prescriber-ontology MCP server starting (queries=%s, %d queries loaded)",
 		queriesDir, len(queryCatalog))
 	if err := server.ServeStdio(s); err != nil {
@@ -239,6 +280,111 @@ func mcpQueryMetric(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 
 	out, err := doQueryMetric(ctx, metric, groupBy, filters, limit)
 	return toolResult(out, err)
+}
+
+// ── Action MCP handlers ─────────────────────────────────────────────────────
+
+func mcpListActions(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	out, err := doListActions()
+	return toolResult(out, err)
+}
+
+func mcpEntityActions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	externalID, err := req.RequireString("external_id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	entityType, err := req.RequireString("type")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	limit := req.GetInt("limit", 0)
+	out, err := doEntityActions(ctx, externalID, entityType, limit)
+	return toolResult(out, err)
+}
+
+// buildMCPActionTool generates a per-action MCP tool from the action definition.
+func buildMCPActionTool(name string, def actionDef, baseOpts []mcp.ToolOption) mcp.Tool {
+	opts := append([]mcp.ToolOption{}, baseOpts...)
+
+	desc := def.Description
+	if def.TargetType != "any" {
+		desc = fmt.Sprintf("%s Target type: %s.", desc, def.TargetType)
+	}
+	opts = append(opts, mcp.WithDescription(desc))
+
+	opts = append(opts, mcp.WithString("external_id",
+		mcp.Required(),
+		mcp.Description(fmt.Sprintf(
+			"External identifier of the target entity (NPI for Prescriber, brand name for Drug, etc.). Type=%s.",
+			def.TargetType))))
+
+	if def.TargetType == "any" {
+		opts = append(opts, mcp.WithString("target_type",
+			mcp.Required(),
+			mcp.Description("Entity type: Prescriber, Drug, GenericDrug, Specialty, or Location.")))
+	}
+
+	for paramName, spec := range def.Params {
+		desc := spec.Description
+		switch spec.Type {
+		case "enum":
+			enumVals := make([]any, len(spec.Values))
+			for i, v := range spec.Values {
+				enumVals[i] = v
+			}
+			stringOpts := []mcp.PropertyOption{mcp.Description(desc), mcp.Enum(spec.Values...)}
+			if spec.Required {
+				stringOpts = append(stringOpts, mcp.Required())
+			}
+			opts = append(opts, mcp.WithString(paramName, stringOpts...))
+		case "string":
+			stringOpts := []mcp.PropertyOption{mcp.Description(desc)}
+			if spec.Required {
+				stringOpts = append(stringOpts, mcp.Required())
+			}
+			opts = append(opts, mcp.WithString(paramName, stringOpts...))
+		case "integer", "number":
+			numOpts := []mcp.PropertyOption{mcp.Description(desc)}
+			if spec.Required {
+				numOpts = append(numOpts, mcp.Required())
+			}
+			opts = append(opts, mcp.WithNumber(paramName, numOpts...))
+		case "boolean":
+			boolOpts := []mcp.PropertyOption{mcp.Description(desc)}
+			if spec.Required {
+				boolOpts = append(boolOpts, mcp.Required())
+			}
+			opts = append(opts, mcp.WithBoolean(paramName, boolOpts...))
+		}
+	}
+
+	return mcp.NewTool("action_"+name, opts...)
+}
+
+// mcpRunAction returns a handler closure bound to a specific action name.
+func mcpRunAction(actionName string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		externalID, err := req.RequireString("external_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		input := map[string]any{}
+		for k, v := range req.GetArguments() {
+			if k == "external_id" {
+				continue
+			}
+			if k == "target_type" {
+				if s, ok := v.(string); ok {
+					input["_target_type"] = s
+				}
+				continue
+			}
+			input[k] = v
+		}
+		out, err := executeAction(ctx, actionName, externalID, input, "agent:mcp", "")
+		return toolResult(out, err)
+	}
 }
 
 func toolResult(out string, err error) (*mcp.CallToolResult, error) {
