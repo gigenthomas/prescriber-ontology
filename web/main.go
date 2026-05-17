@@ -550,7 +550,11 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 
 	renderUser(w, userMsg)
 	for _, t := range toolTrace {
-		renderTool(w, t)
+		if strings.Contains(t, "denied by policy:") {
+			renderDeny(w, t)
+		} else {
+			renderTool(w, t)
+		}
 	}
 	renderBot(w, finalText)
 }
@@ -588,15 +592,17 @@ func saveHistory(sid string, h []anthropic.MessageParam) {
 // ── Rendering ───────────────────────────────────────────────────────────────
 
 var (
-	userTpl  = template.Must(template.New("u").Parse(`<div class="msg user">{{.}}</div>`))
-	botTpl   = template.Must(template.New("b").Parse(`<div class="msg bot">{{.}}</div>`))
-	toolTpl  = template.Must(template.New("t").Parse(`<div class="msg tool">{{.}}</div>`))
-	errorTpl = template.Must(template.New("e").Parse(`<div class="msg error">{{.}}</div>`))
+	userTpl   = template.Must(template.New("u").Parse(`<div class="msg user">{{.}}</div>`))
+	botTpl    = template.Must(template.New("b").Parse(`<div class="msg bot">{{.}}</div>`))
+	toolTpl   = template.Must(template.New("t").Parse(`<div class="msg tool">{{.}}</div>`))
+	denyTpl   = template.Must(template.New("d").Parse(`<div class="msg deny">{{.}}</div>`))
+	errorTpl  = template.Must(template.New("e").Parse(`<div class="msg error">{{.}}</div>`))
 )
 
 func renderUser(w http.ResponseWriter, s string)  { userTpl.Execute(w, s) }
 func renderBot(w http.ResponseWriter, s string)   { botTpl.Execute(w, s) }
 func renderTool(w http.ResponseWriter, s string)  { toolTpl.Execute(w, s) }
+func renderDeny(w http.ResponseWriter, s string)  { denyTpl.Execute(w, s) }
 func renderError(w http.ResponseWriter, s string) { errorTpl.Execute(w, s) }
 
 // ── Agent loop ──────────────────────────────────────────────────────────────

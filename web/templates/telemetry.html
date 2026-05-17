@@ -108,6 +108,10 @@
         <div class="label">Distinct sessions</div>
         <div class="value">{{.Summary.DistinctSessions}}</div>
       </div>
+      <div class="card">
+        <div class="label">Denied by policy</div>
+        <div class="value">{{.Summary.Denied}}</div>
+      </div>
     </div>
 
     <h2>Per-tool aggregates (last 7 days)</h2>
@@ -154,6 +158,13 @@
         <option value="pending" {{if eq "pending" .Filter.Status}}selected{{end}}>pending</option>
       </select>
 
+      <label for="opa">Policy:</label>
+      <select name="opa" id="opa">
+        <option value="">all</option>
+        <option value="allowed" {{if eq "allowed" .Filter.OPA}}selected{{end}}>allowed</option>
+        <option value="denied"  {{if eq "denied" .Filter.OPA}}selected{{end}}>denied</option>
+      </select>
+
       <label for="actor">Actor:</label>
       <select name="actor" id="actor">
         <option value="">all</option>
@@ -176,6 +187,7 @@
           <th class="r">Duration</th>
           <th class="r">Size</th>
           <th>Status</th>
+          <th>Policy</th>
           <th>Params</th>
         </tr>
       </thead>
@@ -191,6 +203,12 @@
           <td>
             <span class="badge status-{{.Status}}">{{.Status}}</span>
             {{if .Error}}<div style="color:#8b1a14;font-size:0.75rem;font-family:ui-monospace,monospace;margin-top:0.2rem">{{.Error}}</div>{{end}}
+          </td>
+          <td>
+            {{if eq .OPAAllow "allowed"}}<span class="badge status-ok">allow</span>{{end}}
+            {{if eq .OPAAllow "denied"}}<span class="badge status-error">deny</span>{{end}}
+            {{if eq .OPAAllow ""}}<span style="color:#999;font-size:0.8rem">—</span>{{end}}
+            {{if .OPAReason}}<div style="color:#555;font-size:0.74rem;margin-top:0.2rem;max-width:280px">{{.OPAReason}}</div>{{end}}
           </td>
           <td class="params">{{.ParamsJSON}}</td>
         </tr>

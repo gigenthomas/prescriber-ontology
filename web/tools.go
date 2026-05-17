@@ -147,7 +147,9 @@ func doSearchEntities(ctx context.Context, text, entityType string, limit int) (
 	}
 
 	args := []any{text}
-	where := "canonical_label %% $1"
+	// % is the pg_trgm similarity operator. NOT a format directive — fmt.Sprintf
+	// doesn't reinterpret the substituted value, so a single % is correct here.
+	where := "canonical_label % $1"
 	if entityType != "" {
 		where += " AND type = $2"
 		args = append(args, entityType)

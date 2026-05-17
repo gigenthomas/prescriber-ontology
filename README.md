@@ -52,7 +52,8 @@ attributable.
 | Web chatbot | Go 1.22 + Anthropic Go SDK + HTMX |
 | Agent transport | Model Context Protocol over stdio (`mark3labs/mcp-go`) |
 | LLM | Claude Sonnet 4.6 (configurable) |
-| Containers | Docker Compose (Postgres + Neo4j) |
+| Auth (optional) | Keycloak (OIDC) + OPA (Rego policies) |
+| Containers | Docker Compose (Postgres + Neo4j + Keycloak + OPA) |
 
 ---
 
@@ -65,7 +66,7 @@ attributable.
 
 Connectivity expectations:
 
-- Inbound TCP `5432` (Postgres), `7474` + `7687` (Neo4j), `8080`/`8081` (chatbot)
+- Inbound TCP `5432` (Postgres), `7474` + `7687` (Neo4j), `8080`/`8081` (chatbot), and — if auth is enabled — `8180` (Keycloak admin/login UI) and `8181` (OPA decision API)
 - Outbound HTTPS to `data.cms.gov` (one-time ~3.8 GB download) and `api.anthropic.com`
 
 ---

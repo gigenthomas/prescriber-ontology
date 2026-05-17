@@ -244,6 +244,7 @@ Go, Python) and Anthropic's Claude API. No proprietary lock-in.
 
 - **Declarative semantic layer** — 13 metrics × 7 dimensions in `metrics.yaml`, no code required to add more.
 - **MCP server** — the same five-plus-two tool surface is now reachable by any Model Context Protocol client (Claude Desktop, Claude Code, internal agents) by running `prescriber-bot.exe -mcp`.
+- **Identity + policy (optional)** — Keycloak issues OIDC tokens; an OPA sidecar evaluates Rego policies on every tool call and action. The chat UI, the MCP transport, and write-back actions all share the same `(actor, role, tool, args)` decision surface, with allow/deny + reason logged to `tool_call_log` and surfaced in the telemetry UI. Disable by leaving `AUTH_PROVIDER` unset; the platform falls back to anonymous mode with permissive policy for dev.
 
 ## Decisions on the table
 
@@ -266,3 +267,11 @@ both *what* was answered and *how*.
 The LLM is constrained to nine pre-built tools and cannot execute arbitrary
 queries against the databases. Database credentials are not exposed to the
 model.
+
+When Keycloak + OPA are enabled, every tool call is also gated by a Rego
+policy that sees the caller's identity and roles. Denied calls never reach
+the database — they are short-circuited at the dispatch boundary, logged with
+a human-readable reason, and surfaced to the user as a `[DENIED]` trace line
+rather than an opaque failure. The chat transport and the MCP transport share
+the same policy decision path, so an analyst on the web UI and an automated
+agent over stdio are evaluated against the same rules.

@@ -24,6 +24,7 @@ type telemetrySummary struct {
 	P95Ms            int
 	DistinctTools    int
 	DistinctSessions int
+	Denied           int
 }
 
 type toolStatRow struct {
@@ -39,6 +40,7 @@ type telemetryFilter struct {
 	Tool   string
 	Status string
 	Actor  string
+	OPA    string // "" | "allowed" | "denied"
 }
 
 type callRow struct {
@@ -51,6 +53,8 @@ type callRow struct {
 	Status     string
 	Error      string
 	ParamsJSON string
+	OPAAllow   string // "allowed" | "denied" | ""
+	OPAReason  string
 }
 
 func telemetryHandler(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +68,7 @@ func telemetryHandler(w http.ResponseWriter, r *http.Request) {
 		Tool:   strings.TrimSpace(r.URL.Query().Get("tool")),
 		Status: strings.TrimSpace(r.URL.Query().Get("status")),
 		Actor:  strings.TrimSpace(r.URL.Query().Get("actor")),
+		OPA:    strings.TrimSpace(r.URL.Query().Get("opa")),
 	}
 
 	summary, err := loadTelemetrySummary(ctx)
@@ -108,9 +113,10 @@ func loadTelemetrySummary(ctx context.Context) (telemetrySummary, error) {
             COALESCE(avg(duration_ms), 0)::int,
             COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms), 0)::int,
             count(DISTINCT tool_name),
-            count(DISTINCT session_id) FILTER (WHERE session_id IS NOT NULL)
+            count(DISTINCT session_id) FILTER (WHERE session_id IS NOT NULL),
+            count(*) FILTER (WHERE opa_allow = false)
         FROM tool_call_log`).Scan(
-		&s.Total, &s.Errors, &s.AvgMs, &s.P95Ms, &s.DistinctTools, &s.DistinctSessions)
+		&s.Total, &s.Errors, &s.AvgMs, &s.P95Ms, &s.DistinctTools, &s.DistinctSessions, &s.Denied)
 	return s, err
 }
 
@@ -152,7 +158,9 @@ func loadCallRows(ctx context.Context, f telemetryFilter, limit int) ([]callRow,
                COALESCE(result_size, 0),
                status,
                COALESCE(error_msg, ''),
-               COALESCE(params::text, '')
+               COALESCE(params::text, ''),
+               opa_allow,
+               COALESCE(opa_reason, '')
         FROM tool_call_log
         WHERE 1=1`)
 
@@ -169,6 +177,12 @@ func loadCallRows(ctx context.Context, f telemetryFilter, limit int) ([]callRow,
 	}
 	if f.Actor != "" {
 		add(` AND actor = $?`, f.Actor)
+	}
+	switch f.OPA {
+	case "allowed":
+		q.WriteString(` AND opa_allow = true`)
+	case "denied":
+		q.WriteString(` AND opa_allow = false`)
 	}
 	args = append(args, limit)
 	q.WriteString(` ORDER BY invoked_at DESC LIMIT ` + placeholder(len(args)))
@@ -190,15 +204,15 @@ func loadCallRows(ctx context.Context, f telemetryFilter, limit int) ([]callRow,
 			duration int
 			rsize    int
 			status   string
-			errMsg   sql.NullString
 			params   string
+			opaAllow sql.NullBool
+			opaReason string
 			cr       callRow
 		)
 		var errStr string
-		if err := rows.Scan(&id, &invoked, &tool, &actor, &trans, &duration, &rsize, &status, &errStr, &params); err != nil {
+		if err := rows.Scan(&id, &invoked, &tool, &actor, &trans, &duration, &rsize, &status, &errStr, &params, &opaAllow, &opaReason); err != nil {
 			return nil, err
 		}
-		_ = errMsg
 		cr.When = invoked.Format("2006-01-02 15:04:05")
 		cr.Tool = tool
 		cr.Actor = actor
@@ -208,6 +222,14 @@ func loadCallRows(ctx context.Context, f telemetryFilter, limit int) ([]callRow,
 		cr.Status = status
 		cr.Error = errStr
 		cr.ParamsJSON = prettyJSONShort(params, 240)
+		if opaAllow.Valid {
+			if opaAllow.Bool {
+				cr.OPAAllow = "allowed"
+			} else {
+				cr.OPAAllow = "denied"
+			}
+		}
+		cr.OPAReason = opaReason
 		out = append(out, cr)
 	}
 	return out, rows.Err()
