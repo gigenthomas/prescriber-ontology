@@ -96,6 +96,7 @@ func runHTTP() {
 	http.HandleFunc("/chat", chatHandler)
 	http.HandleFunc("/actions", actionsHandler)
 	http.HandleFunc("/telemetry", telemetryHandler)
+	http.HandleFunc("/lineage", lineageHandler)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 
 	addr := getenv("ADDR", ":8080")
@@ -438,6 +439,30 @@ func buildTools() {
 				Required: []string{"external_id", "type"},
 			},
 		},
+		{
+			Name: "entity_lineage",
+			Description: anthropic.String(
+				"Return the full lineage for one entity: identity, source dataset, pipeline runs that " +
+					"touched it, actions applied to it, current entity_state, and recent change_events. " +
+					"Use when asked 'where did this come from' or 'what's the history of this entity'."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"external_id": map[string]any{
+						"type":        "string",
+						"description": "External identifier (NPI for Prescriber, brand name for Drug, etc.).",
+					},
+					"type": map[string]any{
+						"type":        "string",
+						"description": "Entity type.",
+					},
+					"event_limit": map[string]any{
+						"type":        "integer",
+						"description": "Max recent change_events to return (default 25, max 200).",
+					},
+				},
+				Required: []string{"external_id", "type"},
+			},
+		},
 	}
 
 	for _, t := range buildActionTools() {
@@ -697,6 +722,16 @@ func dispatchTool(ctx context.Context, name, inputJSON string) (string, error) {
 			return "", fmt.Errorf("bad input: %w", err)
 		}
 		return doEntityActions(ctx, in.ExternalID, in.Type, in.Limit)
+	case "entity_lineage":
+		var in struct {
+			ExternalID string `json:"external_id"`
+			Type       string `json:"type"`
+			EventLimit int    `json:"event_limit"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+			return "", fmt.Errorf("bad input: %w", err)
+		}
+		return doEntityLineage(ctx, in.ExternalID, in.Type, in.EventLimit)
 	}
 
 	if strings.HasPrefix(name, "action_") {

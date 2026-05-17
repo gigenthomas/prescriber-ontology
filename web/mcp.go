@@ -177,6 +177,21 @@ func runMCP() {
 		mcpDispatch("entity_actions"),
 	)
 
+	s.AddTool(
+		mcp.NewTool("entity_lineage",
+			append(readOnly,
+				mcp.WithDescription("Full lineage for one entity: identity, source dataset, pipeline runs that touched it, actions applied to it, current entity_state, and recent change_events. Use when asked 'where did this come from' or 'what's the history of this entity'."),
+				mcp.WithString("external_id", mcp.Required(),
+					mcp.Description("External identifier (NPI, brand name, etc.).")),
+				mcp.WithString("type", mcp.Required(),
+					mcp.Description("Entity type.")),
+				mcp.WithNumber("event_limit",
+					mcp.Description("Max recent change_events to return (default 25, max 200).")),
+			)...,
+		),
+		mcpDispatch("entity_lineage"),
+	)
+
 	for _, name := range actionNames() {
 		def := actionCfg.Actions[name]
 		s.AddTool(buildMCPActionTool(name, def, writeAction), mcpDispatch("action_"+name))

@@ -121,9 +121,16 @@ def transform(year: int, state: str) -> dict[str, int]:
 
 def run(year: int, state: str) -> dict[str, int]:
     from ontology.ingest.prescriber.fetch import download
+    from ontology.lineage import pipeline_run
 
-    csv_path = download()
-    staged = stage_csv(csv_path, state)
-    counts = transform(year, state)
-    counts["_staged_rows"] = staged
-    return counts
+    with pipeline_run(
+        "prescriber.load",
+        inputs={"year": year, "state": state},
+        actor="user:cli",
+    ) as plr:
+        csv_path = download()
+        staged = stage_csv(csv_path, state)
+        counts = transform(year, state)
+        counts["_staged_rows"] = staged
+        plr.outputs.update(counts)
+        return counts

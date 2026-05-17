@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{.Title}} · Lineage</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      background: #fafafa;
+      color: #1a1a1a;
+    }
+    header {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid #ddd;
+      background: white;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    header h1 { margin: 0; font-size: 1rem; font-weight: 600; }
+    header nav a { color: #2d6cdf; text-decoration: none; margin-left: 1rem; font-weight: 500; }
+    header nav a:hover { text-decoration: underline; }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+    h2 { font-size: 0.95rem; margin: 1.5rem 0 0.6rem; color: #444; text-transform: uppercase; letter-spacing: 0.04em; }
+    h2:first-of-type { margin-top: 0; }
+
+    .lookup {
+      background: white; border: 1px solid #e3e3e3; border-radius: 0.5rem;
+      padding: 0.65rem 0.9rem; margin-bottom: 1rem;
+      display: flex; gap: 0.5rem; align-items: center;
+    }
+    .lookup label { font-size: 0.85rem; color: #555; }
+    .lookup select, .lookup input {
+      padding: 0.35rem 0.5rem; border: 1px solid #ccc; border-radius: 0.35rem; font: inherit;
+    }
+    .lookup button {
+      padding: 0.35rem 0.9rem; border: 0; border-radius: 0.35rem; background: #2d6cdf;
+      color: white; font: inherit; cursor: pointer;
+    }
+
+    .card {
+      background: white; border: 1px solid #e3e3e3; border-radius: 0.5rem;
+      padding: 0.9rem 1rem; margin-bottom: 1rem;
+    }
+    .identity { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1.2rem; }
+    .identity dt { font-weight: 600; color: #666; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    .identity dd { margin: 0; font-family: ui-monospace, monospace; font-size: 0.88rem; }
+    .identity dd.label { font-family: inherit; }
+
+    table { width: 100%; border-collapse: collapse; background: white; border: 1px solid #e3e3e3; border-radius: 0.5rem; overflow: hidden; }
+    th { text-align: left; padding: 0.55rem 0.7rem; background: #f5f5f5; font-weight: 600; font-size: 0.78rem; color: #555; text-transform: uppercase; border-bottom: 1px solid #e3e3e3; }
+    td { padding: 0.5rem 0.7rem; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    td.r { text-align: right; }
+    .when { color: #888; white-space: nowrap; font-size: 0.8rem; }
+
+    .badge {
+      display: inline-block; padding: 0.1rem 0.5rem; border-radius: 0.5rem;
+      font-size: 0.75rem; font-weight: 600;
+    }
+    .status-succeeded, .status-applied, .status-ok { background: #d9f5e0; color: #197435; }
+    .status-failed, .status-rejected, .status-error { background: #fdecea; color: #8b1a14; }
+    .status-running, .status-pending { background: #fff3cd; color: #856404; }
+
+    .json { font-family: ui-monospace, monospace; font-size: 0.78rem; white-space: pre-wrap; color: #444; max-height: 12rem; overflow: auto; }
+    .empty { padding: 1.5rem; text-align: center; color: #888; }
+    .timeline-row code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 0.25rem; font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Lineage</h1>
+    <nav>
+      <a href="/">← Chat</a>
+      <a href="/actions">Actions log</a>
+      <a href="/telemetry">Telemetry</a>
+    </nav>
+  </header>
+
+  <main>
+    <form class="lookup" method="get" action="/lineage">
+      <label for="type">Type:</label>
+      <select name="type" id="type">
+        {{range $t := .Types}}<option value="{{$t}}" {{if eq $t $.Type}}selected{{end}}>{{$t}}</option>{{end}}
+      </select>
+      <label for="external_id">External ID:</label>
+      <input type="text" name="external_id" id="external_id" value="{{.ExternalID}}" placeholder="e.g. 1427277136" size="20">
+      <button type="submit">Look up</button>
+    </form>
+
+    {{if .NotFound}}
+    <div class="card empty">
+      <strong>Not found.</strong> No <code>{{.Type}}</code> with external_id <code>{{.ExternalID}}</code>.
+      Try the <a href="/">chat</a> to <code>search_entities</code> for the right ID.
+    </div>
+    {{else if .HasResult}}
+
+    <h2>Identity</h2>
+    <div class="card">
+      <dl class="identity">
+        <dt>Canonical label</dt> <dd class="label">{{.Identity.CanonicalLabel}}</dd>
+        <dt>Type</dt>            <dd>{{.Identity.Type}}</dd>
+        <dt>External ID</dt>     <dd>{{.Identity.ExternalID}}</dd>
+        <dt>Internal UUID</dt>   <dd>{{.Identity.UUID}}</dd>
+        <dt>Created at</dt>      <dd class="when">{{.Identity.CreatedAt}}</dd>
+        <dt>Last updated</dt>    <dd class="when">{{.Identity.UpdatedAt}}</dd>
+        <dt>Version</dt>         <dd>{{.Identity.Version}}</dd>
+      </dl>
+    </div>
+
+    <h2>Source</h2>
+    {{if .Source.Name}}
+    <div class="card">
+      <dl class="identity">
+        <dt>Dataset</dt> <dd class="label">{{.Source.Name}}</dd>
+        {{if .Source.Version}}<dt>Version</dt> <dd>{{.Source.Version}}</dd>{{end}}
+        {{if .Source.URI}}<dt>URI</dt> <dd><a href="{{.Source.URI}}">{{.Source.URI}}</a></dd>{{end}}
+      </dl>
+    </div>
+    {{else}}
+    <div class="card empty">No source recorded.</div>
+    {{end}}
+
+    <h2>Source attributes (from the dataset)</h2>
+    <div class="card">
+      <div class="json">{{.Identity.AttrsJSON}}</div>
+    </div>
+
+    <h2>Current action-driven state</h2>
+    {{if .CurrentState}}
+    <div class="card">
+      <div class="json">{{.CurrentState}}</div>
+      {{if .StateUpdatedAt}}<div class="when" style="margin-top:0.4rem">updated {{.StateUpdatedAt}}</div>{{end}}
+    </div>
+    {{else}}
+    <div class="card empty">No action-driven state. No actions have been applied to this entity.</div>
+    {{end}}
+
+    <h2>Pipeline runs that touched this entity</h2>
+    {{if .PipelineRuns}}
+    <table>
+      <thead>
+        <tr><th>Started</th><th>Name</th><th>Status</th><th>Actor</th><th class="r">Events</th><th>Inputs</th></tr>
+      </thead>
+      <tbody>
+        {{range .PipelineRuns}}
+        <tr>
+          <td class="when">{{.StartedAt}}</td>
+          <td><code>{{.Name}}</code></td>
+          <td><span class="badge status-{{.Status}}">{{.Status}}</span></td>
+          <td>{{.Actor}}</td>
+          <td class="r">{{.EventCount}}</td>
+          <td class="json" style="max-height:4rem">{{.InputsJSON}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="card empty">No pipeline runs recorded. (Earlier ETL ran before the pipeline_run table existed — recent runs will appear here.)</div>
+    {{end}}
+
+    <h2>Actions applied</h2>
+    {{if .Actions}}
+    <table>
+      <thead>
+        <tr><th>When</th><th>Action</th><th>Actor</th><th>Status</th><th>Params</th></tr>
+      </thead>
+      <tbody>
+        {{range .Actions}}
+        <tr>
+          <td class="when">{{.InvokedAt}}</td>
+          <td><code>{{.Action}}</code></td>
+          <td>{{.Actor}}</td>
+          <td>
+            <span class="badge status-{{.Status}}">{{.Status}}</span>
+            {{if .Error}}<div style="color:#8b1a14;font-size:0.75rem;font-family:ui-monospace,monospace">{{.Error}}</div>{{end}}
+          </td>
+          <td class="json" style="max-height:4rem">{{.ParamsJSON}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="card empty">No actions applied to this entity.</div>
+    {{end}}
+
+    <h2>Recent change events</h2>
+    {{if .Events}}
+    <table>
+      <thead>
+        <tr><th>When</th><th>Topic</th><th>Op</th><th>Caused by</th></tr>
+      </thead>
+      <tbody>
+        {{range .Events}}
+        <tr class="timeline-row">
+          <td class="when">{{.OccurredAt}}</td>
+          <td><code>{{.Topic}}</code></td>
+          <td>{{.Op}}</td>
+          <td>
+            {{if .PipelineRunName}}pipeline: <code>{{.PipelineRunName}}</code>{{end}}
+            {{if .ActionName}}action: <code>{{.ActionName}}</code>{{end}}
+            {{if and (not .PipelineRunName) (not .ActionName)}}<span style="color:#888">(no attribution recorded)</span>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="card empty">No change events recorded for this entity.</div>
+    {{end}}
+
+    {{end}}
+  </main>
+</body>
+</html>

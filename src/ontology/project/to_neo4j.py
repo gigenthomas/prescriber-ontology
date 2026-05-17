@@ -66,6 +66,15 @@ def _chunks(cur, n: int):
 
 def project() -> tuple[int, int]:
     """Read entities + relations from Postgres and project them into Neo4j."""
+    from ontology.lineage import pipeline_run
+
+    with pipeline_run("prescriber.project", actor="user:cli") as plr:
+        e, r = _project_inner()
+        plr.outputs.update({"entities": e, "relations": r})
+        return e, r
+
+
+def _project_inner() -> tuple[int, int]:
     driver = neo4j_driver()
     entities = 0
     relations = 0
