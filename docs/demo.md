@@ -29,12 +29,14 @@ docker compose exec -T postgres psql -U ontology -d ontology -t -A -c "
   ORDER BY canonical_label LIMIT 3"
 ```
 
-Open two side-by-side windows:
+Open these windows side by side:
 
 - **Left:** the chatbot at http://localhost:8081 (open in a private window so
   the conversation starts fresh)
-- **Right:** a `psql` shell into the Postgres container — useful for showing
-  the audit log lands in real time
+- **Right (Act 4):** the Actions log at http://localhost:8081/actions
+  — refresh after each action and the new row appears at the top
+- **Optional terminal:** a `psql` shell into the Postgres container — useful
+  if someone in the audience wants to see the raw rows behind the UI
 
 ---
 
@@ -93,40 +95,50 @@ struggle with.
 
 **This is the climactic demo.** Up to here we've only read. Now we write.
 
-**Setup the scenario:** *"Suppose compliance has asked us to flag any cardiologist whose prescribing pattern looks unusual for review."*
+**Setup the scene:** open http://localhost:8081/actions in the right window.
+Empty (or near-empty) table — point out the summary cards at the top:
+*Total invocations*, *Applied*, *Rejected*, *Entities with state*.
+
+**Frame the scenario:** *"Suppose compliance has asked us to flag any
+cardiologist whose prescribing pattern looks unusual for review."*
 
 | Step | Prompt | What the audience sees |
 |------|--------|------------------------|
 | 1 | *"List the actions you can perform."* | LLM calls `list_actions` — surfaces `flag_for_review`, `unflag`, `add_to_watchlist`, `add_note`. |
 | 2 | *"Find a cardiologist in San Francisco who heavily prescribes Eliquis."* | LLM chains `search_entities` and `query_metric(filters={drug:Eliquis, city:'SAN FRANCISCO', specialty:Cardiology})`. Returns a specific NPI + name. |
-| 3 | *"Flag NPI <copied-from-step-2> for review. Reason: 'top-5 Eliquis prescriber in San Francisco — routine compliance check'. Severity: low."* | Trace shows `action_flag_for_review(...)` — returns an `invocation_id` and `state_updates: {flagged: true, ...}`. |
-| 4 | **Switch to psql** | `SELECT * FROM action_invocation ORDER BY invoked_at DESC LIMIT 1;` — show the row Just Got Written. |
-| 5 | **Stay in psql** | `SELECT e.canonical_label, es.state FROM entity_state es JOIN entity e ON e.id = es.entity_id;` — show the entity state reflects the flag. |
-| 6 | **Back in chat** | *"Show me the action history for that NPI."* — LLM calls `entity_actions`, returns the invocation list + current state. |
-| 7 | *"Clear the flag — turns out the pattern is normal."* | `action_unflag` applied. Show psql again: state now `{flagged: false, ...}`. The invocation is in the audit log forever. |
+| 3 | *"Flag NPI <copied-from-step-2> for review. Reason: 'top-5 Eliquis prescriber in San Francisco — routine compliance check'. Severity: low."* | Chat trace: `action_flag_for_review(...)` → `invocation_id` + `state_updates: {flagged: true, ...}`. |
+| 4 | **Refresh the Actions log** in the right window | Top row is the action that just happened — params, target name, the resulting state JSON, status badge `applied`. The "Total invocations" counter ticked up. |
+| 5 | **In chat** | *"Show me the action history for that NPI."* — LLM calls `entity_actions`, returns the invocation list + current state. The chat trace and the UI agree. |
+| 6 | *"Clear the flag — turns out the pattern is normal."* | `action_unflag` applied. Refresh the Actions log: a second row appears for the same target, state column now `{flagged: false, flag_reason: null, ...}`. The earlier flag row stays — append-only audit. |
+| 7 | **In the Actions UI**, click the `target_type` dropdown → `Prescriber` and Apply | Filtered view of only Prescriber-targeting actions. Show the filter chain works (also try `status=rejected` once Step 8 fires). |
 
 > **Point to make:** "Every action is parameterized, type-checked, transactional
-> (audit row and state update commit together), and visible in the trace. The
-> LLM can't write SQL; it can only call these named tools. And every change
-> is permanently audited."
+> (audit row and state update commit together), visible in the chat trace, AND
+> visible in the audit UI. The LLM can't write SQL; it can only call these
+> named tools. Every change — and every rejected attempt — is permanently
+> recorded."
 
-### Failure-mode demo (~30 seconds)
+### Step 8: Failure-mode demo (~30 seconds)
 
 To prove the safety boundary:
 
 > *"Flag that same prescriber for review with severity 'nuclear'."*
 
-The trace shows `action_flag_for_review(severity='nuclear')` → error:
+The chat trace shows `action_flag_for_review(severity='nuclear')` → error:
 *"param severity must be one of [low medium high], got 'nuclear'"*.
 
-In psql:
+**Refresh the Actions log.** A new row appears with a red `rejected` badge and
+the error message inline. Filter by `status=rejected` to show only failures.
+Even invalid attempts are part of the permanent record — nothing slips past.
 
-```sql
-SELECT action_name, status, error_msg FROM action_invocation
-WHERE status='rejected' ORDER BY invoked_at DESC LIMIT 1;
-```
-
-Even the rejected attempt is in the audit log. Nothing slips past.
+> **For the audience that asks "where does this actually live?"** open a
+> terminal and run:
+> ```
+> docker compose exec -T postgres psql -U ontology -d ontology -c \
+>   "SELECT action_name, status, error_msg FROM action_invocation
+>    ORDER BY invoked_at DESC LIMIT 3"
+> ```
+> Same data the UI is showing — just the underlying table.
 
 ---
 
@@ -153,34 +165,44 @@ underlying ontology, metrics, and actions are shared.
 
 ## Closing — the platform tour (~5 minutes)
 
-Open these files in order and narrate:
+Open these in order and narrate:
 
-1. **[metrics.yaml](../metrics.yaml)** — *"The entire question vocabulary.
-   13 metrics, 7 dimensions, declarative. Add a new metric, restart, the LLM
-   sees it instantly."*
+1. **http://localhost:8081/actions** — *"This is the audit surface for
+   everything the platform writes. Built into the same chatbot binary; takes
+   a filter on action, status, target type, or external_id."*
 
-2. **[actions.yaml](../actions.yaml)** — *"The write-back vocabulary. Type
-   checks, default values, audit-required flag. Same edit-restart pattern."*
+2. **[metrics.yaml](../metrics.yaml)** — *"The entire read-side question
+   vocabulary. 13 metrics, 7 dimensions, declarative. Add a new metric,
+   restart, the LLM sees it instantly."*
 
-3. **[queries/](../queries/)** — *"Hand-crafted Cypher for the questions
+3. **[actions.yaml](../actions.yaml)** — *"The write-back vocabulary. Type
+   checks, default values, $-substituted state updates. Same edit-restart
+   pattern. Adding `escalate_to_legal` is a four-line YAML change."*
+
+4. **[queries/](../queries/)** — *"Hand-crafted Cypher for the questions
    that don't fit the metric pattern. The LLM picks among these via
    `run_query`."*
 
-4. **[docs/events-plan.md](events-plan.md)** — *"The next layer: automatic
-   propagation of changes, with a Kafka migration path documented up front."*
+5. **[docs/events-plan.md](events-plan.md)** — *"The next layer: automatic
+   propagation of changes from Postgres to Neo4j and beyond, with a Kafka
+   migration path documented up front."*
 
-5. **[ARCHITECTURE.md](../ARCHITECTURE.md)** — *"The full executive
+6. **[ARCHITECTURE.md](../ARCHITECTURE.md)** — *"The full executive
    briefing if you want to send it to someone who wasn't here."*
 
 ---
 
 ## After the demo — cleanup
 
+Before wiping, the Actions log page is a good record to screenshot if you
+want to keep evidence of what was demonstrated.
+
 ```powershell
 # Wipe the demo actions so the slate is clean for next time
 docker compose exec -T postgres psql -U ontology -d ontology -c "
   TRUNCATE entity_state;
   DELETE FROM action_invocation;"
+# Refresh http://localhost:8081/actions — all counters should drop to zero.
 
 # Optionally stop the chatbot
 # (find the task in your terminal session and Ctrl+C, or kill the process)
