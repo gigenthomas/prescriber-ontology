@@ -90,6 +90,7 @@ func runHTTP() {
 
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/chat", chatHandler)
+	http.HandleFunc("/actions", actionsHandler)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 
 	addr := getenv("ADDR", ":8080")
