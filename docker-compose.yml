@@ -36,3 +36,57 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+
+  # ─── Auth: Keycloak (OIDC identity provider) ────────────────────────────
+  #
+  # Dev-mode start uses an internal H2 database — persisted via the volume
+  # so users/sessions survive container restarts. Switch to KC_DB=postgres
+  # for production. The realm import runs only when the data volume is
+  # empty (first boot); to re-import, wipe ./docker/volumes/keycloak.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-keycloak-dev}
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8180"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8180:8080"
+      - "9000:9000"  # management/health endpoint
+    volumes:
+      - ./docker/volumes/keycloak:/opt/keycloak/data
+      - ./auth/keycloak/realms:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'UP' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # ─── Auth: OPA (Open Policy Agent) ──────────────────────────────────────
+  #
+  # Loads every .rego file under ./auth/policies at startup. Decision API
+  # at POST http://opa:8181/v1/data/<package>/<rule>. Exposed on the host
+  # for dev convenience.
+  opa:
+    image: openpolicyagent/opa:latest
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-format=json"
+      - "--log-level=info"
+      - "/policies"
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./auth/policies:/policies:ro
+    healthcheck:
+      test: ["CMD", "/opa", "version"]   # OPA image has no curl/wget — `opa version` is the lightest liveness check
+      interval: 10s
+      timeout: 3s
+      retries: 5

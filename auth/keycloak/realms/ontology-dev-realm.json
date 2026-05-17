@@ -1,0 +1,138 @@
+{
+  "realm": "ontology-dev",
+  "enabled": true,
+  "displayName": "Prescriber Ontology (dev)",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "sslRequired": "none",
+  "accessTokenLifespan": 900,
+  "refreshTokenMaxReuse": 0,
+  "ssoSessionIdleTimeout": 7200,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      { "name": "viewer",            "description": "Read-only access to the ontology" },
+      { "name": "analyst",           "description": "Read + audit-only actions (add_note)" },
+      { "name": "compliance",        "description": "Standard write actions (flag/unflag low+medium, watchlist)" },
+      { "name": "senior_compliance", "description": "Includes high-severity flag authorization" },
+      { "name": "admin",             "description": "Full access to every tool and action" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "ontology-web",
+      "name": "Prescriber Ontology Web Chatbot",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "rootUrl": "http://localhost:8081",
+      "baseUrl": "http://localhost:8081/",
+      "redirectUris": [
+        "http://localhost:8081/auth/callback",
+        "http://localhost:8081/*"
+      ],
+      "webOrigins": ["http://localhost:8081"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8081/##http://localhost:8081/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles in token",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "ontology-mcp",
+      "name": "Prescriber Ontology MCP Server",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "ontology-mcp-dev-secret-change-me",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "frontchannelLogout": false,
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "realm roles in token",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Analyst",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "alice-dev", "temporary": false }
+      ],
+      "realmRoles": ["analyst"]
+    },
+    {
+      "username": "bob",
+      "email": "bob@example.com",
+      "firstName": "Bob",
+      "lastName": "Compliance",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "bob-dev", "temporary": false }
+      ],
+      "realmRoles": ["compliance"]
+    },
+    {
+      "username": "carol",
+      "email": "carol@example.com",
+      "firstName": "Carol",
+      "lastName": "Senior-Compliance",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "carol-dev", "temporary": false }
+      ],
+      "realmRoles": ["senior_compliance"]
+    },
+    {
+      "username": "dave",
+      "email": "dave@example.com",
+      "firstName": "Dave",
+      "lastName": "Admin",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "dave-dev", "temporary": false }
+      ],
+      "realmRoles": ["admin", "senior_compliance", "compliance", "analyst", "viewer"]
+    }
+  ]
+}
