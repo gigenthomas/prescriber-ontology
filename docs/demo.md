@@ -281,6 +281,109 @@ answers regardless of which CA prescriber you pick.
 - *"Flag every prescriber in this list of NPIs for review with reason 'Q2 compliance batch'"* — demonstrates batched Actions across many entities
 - *"Show me everything you can do to a Drug."* — surfaces `add_to_watchlist`, `add_note`, and any future Drug-targeted Action without you having to name them
 
+---
+
+## Appendix: auth v1 verification walkthrough
+
+A self-check protocol, separate from the audience-facing Act 6. Run this
+end-to-end any time you change a policy file, touch the auth code, or want
+to confirm the verification checklist in [auth-plan.md](auth-plan.md) is
+still green. ~10 minutes.
+
+### Step 0 — bring up the full stack in auth mode
+
+```powershell
+docker compose up -d
+docker compose ps                       # postgres, neo4j, keycloak, opa all "healthy"
+
+# Kill any earlier bot run first, then:
+$env:AUTH_PROVIDER="keycloak"
+$env:MCP_SERVICE_ROLES="compliance"
+.\prescriber-bot.exe
+```
+
+Expect in the startup log:
+- `auth: provider=keycloak issuer=http://localhost:8180/realms/ontology-dev …`
+- `opa: enabled url=http://localhost:8181/v1/data/…`
+
+### Step 1 — unauthenticated redirect
+
+Open `http://localhost:8081/` in a **fresh private window**. Should bounce
+to Keycloak's `realms/ontology-dev/protocol/openid-connect/auth?...`.
+
+### Step 2 — alice (analyst) — read OK, action denied
+
+Log in: `alice` / `alice-dev`. Header pill: **alice (analyst) · logout**.
+
+| Prompt | Expect |
+|---|---|
+| *"Top 5 specialties by total drug cost"* | Real numbers. Trace shows `query_metric` with no DENY badge. |
+| *"Flag NPI 1427277136 for review, severity low, reason 'routine check'"* | Trace: `[DENIED] action_flag_for_review` with reason `requires compliance; user has [analyst]`. |
+
+Logout — confirm bounce through Keycloak end-session and back to `/`.
+
+### Step 3 — bob (compliance) — low OK, high denied
+
+Log in: `bob` / `bob-dev`. Header pill: **bob (compliance)**.
+
+| Prompt | Expect |
+|---|---|
+| *"Flag NPI 1427277136 for review, severity low, reason 'routine check'"* | Applied. `invocation_id` returned. |
+| *"Re-flag the same NPI with severity high, reason 'pattern unusual'"* | `[DENIED]` with reason `severity=high requires senior_compliance; user has [compliance]`. |
+
+Logout.
+
+### Step 4 — carol (senior_compliance) — high OK
+
+Log in: `carol` / `carol-dev`. Header pill: **carol (senior_compliance)**.
+
+| Prompt | Expect |
+|---|---|
+| *"Flag NPI 1427277136 for review, severity high, reason 'pattern unusual for specialty'"* | Applied. |
+
+### Step 5 — verify the audit surface
+
+`http://localhost:8081/telemetry` (still logged in as carol):
+
+- **Denied by policy** summary card ≥ 2 (alice's flag + bob's high-flag).
+- **Actor filter dropdown** lists real names (`alice`, `bob`, `carol`) plus the synthetic labels. *(Phase 4a behavior — names not UUIDs.)*
+- Filter `Policy = denied` → two rows, each with the full Rego reason inline.
+- Filter `Actor = alice (…)` → only alice's calls.
+- Reset filters — *Actor* column shows **names**, not UUIDs.
+
+`http://localhost:8081/actions`:
+
+- Three rows for NPI 1427277136 — alice's (rejected), bob's (applied low), carol's (applied high).
+- Actor column shows **names**, not UUIDs.
+
+### Step 6 — regression sanity
+
+```powershell
+ontology verify                         # expect 13/13 still passing
+```
+
+### Step 7 — restart in anonymous mode (clean up)
+
+```powershell
+# Ctrl+C to stop the bot, then:
+Remove-Item Env:\AUTH_PROVIDER
+Remove-Item Env:\MCP_SERVICE_ROLES
+.\prescriber-bot.exe                    # back to default anonymous mode
+```
+
+`http://localhost:8081/` should now load directly into chat — no Keycloak bounce.
+
+### What "pass" means
+
+Every row in the table above ticked, plus the regression check at Step 6.
+Anything off — a missing display name, a wrong policy reason, a row that
+didn't appear in /actions — is a regression in either the policy file, the
+materializer JOIN, or the dispatch wiring. Start by checking the chat
+trace's reason string against the matching `reason :=` rule in
+[auth/policies/actions.rego](../auth/policies/actions.rego).
+
+---
+
 ## Neo4j Querirs 
 http://localhost:7474/browser/
 
