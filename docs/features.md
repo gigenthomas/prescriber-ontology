@@ -112,13 +112,28 @@ enables. Group order roughly reflects build order.
 | Healthcheck endpoint | `GET /healthz` | Currently returns "ok"; basis for richer DB-ping check |
 | Reset command | `ontology reset --yes` | Wipes both stores while preserving schema and constraints |
 
+## 11 · Events tier (auto Postgres → Neo4j propagation)
+
+| Feature | Where | What it enables |
+|---|---|---|
+| Transactional outbox | [db/postgres/migrations/0003_events.sql](../db/postgres/migrations/0003_events.sql) `change_event` | Append-only row written in the same transaction as the source change; Kafka-shaped fields (topic, key, payload, headers, BIGSERIAL id ≈ offset) |
+| Per-consumer offsets | `consumer_cursor` table | Per-(consumer, topic) cursor; multiple consumers never block each other |
+| Postgres triggers | `emit_change_event()` + variant for entity_state | `entity`, `relation`, `entity_state` INSERT/UPDATE/DELETE all produce events automatically; `pg_notify` fires the wake-up |
+| Consumer framework | [web/events.go](../web/events.go) `EventConsumer` | LISTEN-based drain loop with 30s heartbeat fallback (missed NOTIFYs only delay processing); advance-only cursor commits |
+| Reference consumer: `neo4j_reprojector` | [web/consumers.go](../web/consumers.go) | Incrementally MERGEs entity/relation/state changes into Neo4j; state mutations land with `state_` prefix so they stay visually distinct from source attrs |
+| Startup goroutine wiring | `startConsumers(ctx)` in [web/main.go](../web/main.go) + [web/mcp.go](../web/mcp.go) | One `sync.Once`-guarded launch in both HTTP and MCP modes; no separate process to babysit |
+| Kafka-migration shape | (see [docs/events-plan.md](events-plan.md)) | `change_event.{id,topic,key,payload,headers}` map 1:1 to Kafka record fields; flip via Debezium or a 50-line relay process when scale demands |
+
+**End-to-end verified:** action_flag_for_review → entity_state UPDATE → change_event row → consumer drains → Neo4j node gets `state_flagged=true, state_flag_reason, state_flag_severity`. No manual `ontology project` needed.
+
+**Known gap:** the Python bulk-load path (`ontology load`) doesn't yet use `SET LOCAL session_replication_role = replica` to bypass triggers during the 2.5M-row COPY, so re-running a full state load will fire 2.5M trigger executions and slow noticeably. Documented in [events-plan.md](events-plan.md); easy follow-up.
+
 ---
 
 ## What's planned but not built
 
 | Plan | Doc | Status |
 |---|---|---|
-| Events tier (Postgres outbox + LISTEN/NOTIFY, Kafka-migration-ready) | [docs/events-plan.md](events-plan.md) | Plan only |
 | Eval harness for LLM answer quality | (no plan doc yet) | Recommended |
 | `pgvector` semantic entity resolution | (no plan doc yet) | Recommended |
 | Tool-call telemetry table | (no plan doc yet) | Recommended |
@@ -132,6 +147,8 @@ enables. Group order roughly reflects build order.
 | Nationwide + multi-year data | (no plan doc yet) | Recommended |
 | Open Payments / NPPES integration | (no plan doc yet) | Recommended |
 | Streaming LLM responses (SSE) | (no plan doc yet) | Recommended |
+| Bulk-load trigger bypass on ETL | [events-plan.md](events-plan.md) | Partial — plan documented, Python helper not yet wired |
+| Kafka transport migration | [events-plan.md](events-plan.md) | Plan only — flip when at least two of the trigger criteria become true |
 
 ---
 
@@ -142,3 +159,4 @@ enables. Group order roughly reflects build order.
 - **7** core tools + **N** auto-generated per-action tools exposed to the LLM
 - **13/13** cross-store consistency checks passing
 - **~3,778** prompt-cached tokens per call after the first; ~10× cheaper on the cached portion
+- **Postgres → Neo4j auto-sync latency: ~1 second** (LISTEN/NOTIFY wake-up + drain)
