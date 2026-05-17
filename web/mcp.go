@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -50,13 +49,15 @@ func runMCP() {
 		mcp.WithOpenWorldHintAnnotation(true),
 	}
 
+	// All read-side tools route through the shared dispatcher so telemetry
+	// captures every call uniformly.
 	s.AddTool(
 		mcp.NewTool("list_queries",
 			append(readOnly,
 				mcp.WithDescription("List all available named Cypher queries with their descriptions and required parameters."),
 			)...,
 		),
-		mcpListQueries,
+		mcpDispatch("list_queries"),
 	)
 
 	s.AddTool(
@@ -65,7 +66,7 @@ func runMCP() {
 				mcp.WithDescription("Return the controlled vocabulary (entity types, predicates, attributes) and live entity/relation counts."),
 			)...,
 		),
-		mcpDescribeSchema,
+		mcpDispatch("describe_schema"),
 	)
 
 	s.AddTool(
@@ -80,7 +81,7 @@ func runMCP() {
 				),
 			)...,
 		),
-		mcpRunQuery,
+		mcpDispatch("run_query"),
 	)
 
 	s.AddTool(
@@ -96,7 +97,7 @@ func runMCP() {
 					mcp.Description("Max rows (default 10, max 50).")),
 			)...,
 		),
-		mcpSearchEntities,
+		mcpDispatch("search_entities"),
 	)
 
 	s.AddTool(
@@ -111,7 +112,7 @@ func runMCP() {
 					mcp.Description("Entity type: Prescriber, Drug, GenericDrug, Specialty, or Location.")),
 			)...,
 		),
-		mcpGetEntity,
+		mcpDispatch("get_entity"),
 	)
 
 	s.AddTool(
@@ -120,7 +121,7 @@ func runMCP() {
 				mcp.WithDescription("List available metrics and dimensions for query_metric."),
 			)...,
 		),
-		mcpListMetrics,
+		mcpDispatch("list_metrics"),
 	)
 
 	s.AddTool(
@@ -141,7 +142,7 @@ func runMCP() {
 					mcp.Description("Max rows to return (default 25, max 250).")),
 			)...,
 		),
-		mcpQueryMetric,
+		mcpDispatch("query_metric"),
 	)
 
 	// ── Actions (write-back) ──
@@ -158,7 +159,7 @@ func runMCP() {
 				mcp.WithDescription("List available actions (write-back operations). Each action is also a tool named 'action_<name>'."),
 			)...,
 		),
-		mcpListActions,
+		mcpDispatch("list_actions"),
 	)
 
 	s.AddTool(
@@ -173,12 +174,12 @@ func runMCP() {
 					mcp.Description("Max invocations to return (default 25, max 100).")),
 			)...,
 		),
-		mcpEntityActions,
+		mcpDispatch("entity_actions"),
 	)
 
 	for _, name := range actionNames() {
 		def := actionCfg.Actions[name]
-		s.AddTool(buildMCPActionTool(name, def, writeAction), mcpRunAction(name))
+		s.AddTool(buildMCPActionTool(name, def, writeAction), mcpDispatch("action_"+name))
 	}
 
 	log.Printf("prescriber-ontology MCP server starting (queries=%s, %d queries loaded)",
@@ -212,101 +213,10 @@ Workflow:
 Never invent numbers — only quote values returned by the tools.`
 }
 
-// ── tool handlers ───────────────────────────────────────────────────────────
-
-func mcpListQueries(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	out, err := doListQueries()
-	return toolResult(out, err)
-}
-
-func mcpDescribeSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	out, err := doDescribeSchema(ctx)
-	return toolResult(out, err)
-}
-
-func mcpRunQuery(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString("name")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	params := map[string]any{}
-	if raw, ok := req.GetArguments()["params"].(map[string]any); ok {
-		params = raw
-	}
-	out, err := doRunQuery(ctx, name, params)
-	return toolResult(out, err)
-}
-
-func mcpSearchEntities(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	text, err := req.RequireString("text")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	entityType := req.GetString("type", "")
-	limit := req.GetInt("limit", 10)
-	out, err := doSearchEntities(ctx, text, entityType, limit)
-	return toolResult(out, err)
-}
-
-func mcpGetEntity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	externalID, err := req.RequireString("external_id")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	entityType, err := req.RequireString("type")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	out, err := doGetEntity(ctx, externalID, entityType)
-	return toolResult(out, err)
-}
-
-func mcpListMetrics(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	out, err := doListMetrics()
-	return toolResult(out, err)
-}
-
-func mcpQueryMetric(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	metric, err := req.RequireString("metric")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	groupBy := req.GetString("group_by", "")
-	limit := req.GetInt("limit", 0)
-
-	filters := map[string]string{}
-	if raw, ok := req.GetArguments()["filters"].(map[string]any); ok {
-		for k, v := range raw {
-			if s, ok := v.(string); ok {
-				filters[k] = s
-			}
-		}
-	}
-
-	out, err := doQueryMetric(ctx, metric, groupBy, filters, limit)
-	return toolResult(out, err)
-}
-
-// ── Action MCP handlers ─────────────────────────────────────────────────────
-
-func mcpListActions(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	out, err := doListActions()
-	return toolResult(out, err)
-}
-
-func mcpEntityActions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	externalID, err := req.RequireString("external_id")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	entityType, err := req.RequireString("type")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	limit := req.GetInt("limit", 0)
-	out, err := doEntityActions(ctx, externalID, entityType, limit)
-	return toolResult(out, err)
-}
+// ── MCP tool builders ───────────────────────────────────────────────────────
+// Per-tool handler functions used to live here; they were replaced by
+// mcpDispatch (in telemetry.go) which routes all calls through the shared
+// dispatcher so telemetry only has to be wrapped once.
 
 // buildMCPActionTool generates a per-action MCP tool from the action definition.
 func buildMCPActionTool(name string, def actionDef, baseOpts []mcp.ToolOption) mcp.Tool {
@@ -367,37 +277,5 @@ func buildMCPActionTool(name string, def actionDef, baseOpts []mcp.ToolOption) m
 	return mcp.NewTool("action_"+name, opts...)
 }
 
-// mcpRunAction returns a handler closure bound to a specific action name.
-func mcpRunAction(actionName string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		externalID, err := req.RequireString("external_id")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		input := map[string]any{}
-		for k, v := range req.GetArguments() {
-			if k == "external_id" {
-				continue
-			}
-			if k == "target_type" {
-				if s, ok := v.(string); ok {
-					input["_target_type"] = s
-				}
-				continue
-			}
-			input[k] = v
-		}
-		out, err := executeAction(ctx, actionName, externalID, input, "agent:mcp", "")
-		return toolResult(out, err)
-	}
-}
-
-func toolResult(out string, err error) (*mcp.CallToolResult, error) {
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if out == "" {
-		return mcp.NewToolResultError("empty result"), errors.New("empty result")
-	}
-	return mcp.NewToolResultText(out), nil
-}
+// (mcpRunAction and toolResult were removed when handlers were unified
+// through mcpDispatch in telemetry.go.)

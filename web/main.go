@@ -95,6 +95,7 @@ func runHTTP() {
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/chat", chatHandler)
 	http.HandleFunc("/actions", actionsHandler)
+	http.HandleFunc("/telemetry", telemetryHandler)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 
 	addr := getenv("ADDR", ":8080")
@@ -488,6 +489,7 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
+	ctx = WithCallContext(ctx, "agent:claude", sid, "http")
 
 	updated, finalText, toolTrace, err := runAgent(ctx, history)
 	if err != nil {
@@ -625,10 +627,14 @@ func logUsage(u anthropic.Usage) {
 // ── Tool dispatch ───────────────────────────────────────────────────────────
 
 func executeTool(ctx context.Context, name, inputJSON string) (string, bool) {
+	rec := startToolCall(ctx, name, inputJSON)
 	out, err := dispatchTool(ctx, name, inputJSON)
 	if err != nil {
-		return fmt.Sprintf("error: %v", err), true
+		msg := fmt.Sprintf("error: %v", err)
+		rec.finish(ctx, msg, true)
+		return msg, true
 	}
+	rec.finish(ctx, out, false)
 	return out, false
 }
 
@@ -705,7 +711,11 @@ func dispatchTool(ctx context.Context, name, inputJSON string) (string, error) {
 			in["_target_type"] = tt
 			delete(in, "target_type")
 		}
-		return executeAction(ctx, actionName, externalID, in, "agent:claude", "")
+		actor, session, _ := callContextFrom(ctx)
+		if actor == "unknown" {
+			actor = "agent:claude"
+		}
+		return executeAction(ctx, actionName, externalID, in, actor, session)
 	}
 
 	return "", fmt.Errorf("unknown tool %q", name)
