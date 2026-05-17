@@ -555,7 +555,12 @@ func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthrop
 			Model:     anthropic.Model(model),
 			MaxTokens: 4096,
 			System: []anthropic.TextBlockParam{
-				{Text: systemPrompt},
+				{
+					Text: systemPrompt,
+					CacheControl: anthropic.CacheControlEphemeralParam{
+						Type: "ephemeral",
+					},
+				},
 			},
 			Tools:    tools,
 			Messages: messages,
@@ -564,6 +569,7 @@ func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthrop
 			return messages, "", toolTrace, fmt.Errorf("anthropic: %w", err)
 		}
 
+		logUsage(resp.Usage)
 		messages = append(messages, resp.ToParam())
 
 		var (
@@ -600,6 +606,16 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// logUsage records per-call token + cache stats so we can see whether the
+// prompt cache is hitting. Looks for cache_creation_input_tokens (first
+// request that wrote the cache) and cache_read_input_tokens (subsequent
+// requests that read it).
+func logUsage(u anthropic.Usage) {
+	log.Printf("anthropic usage: input=%d output=%d cache_create=%d cache_read=%d",
+		u.InputTokens, u.OutputTokens,
+		u.CacheCreationInputTokens, u.CacheReadInputTokens)
 }
 
 // ── Tool dispatch ───────────────────────────────────────────────────────────
