@@ -17,6 +17,12 @@ ontology verify                         # expect "13/13 checks passed"
 # 3. Chatbot reachable
 curl http://localhost:8081/healthz      # expect "ok"
 
+# 3a. (Act 6 only) start the chatbot in auth mode and confirm Keycloak + OPA
+#     are healthy. Skip this if you're only demoing acts 1–5.
+docker compose ps                       # also expect keycloak + opa healthy
+$env:AUTH_PROVIDER="keycloak"; $env:MCP_SERVICE_ROLES="compliance"
+.\prescriber-bot.exe                    # logs should show "auth=keycloak" + "opa=enabled"
+
 # 4. Fresh slate for the action demos (optional — wipes prior demo state)
 docker compose exec -T postgres psql -U ontology -d ontology -c "
   TRUNCATE entity_state;
@@ -163,6 +169,51 @@ underlying ontology, metrics, and actions are shared.
 
 ---
 
+## Act 6 — "Every call is gated by policy" (optional, auth mode only)
+
+**Goal:** show that identity and authorization are first-class. The same tool
+surface that powers everything above is filtered by a policy engine that
+sees *who* is calling and *what they're trying to do* — and the decision is
+logged the same way every other tool call is.
+
+**Prerequisite:** Acts 1–5 ran in default (anonymous) mode. To run this act,
+restart with `AUTH_PROVIDER=keycloak` (see preflight step 3a) and open the
+chatbot in a fresh private window so it doesn't hold a stale cookie.
+
+**Setup the scene:** the chat URL now redirects to Keycloak. Log in once as
+`alice` (password `alice-dev`) so the audience sees the OIDC flow once. The
+header pill now reads **Alice (analyst) · logout**.
+
+**Frame the scenario:** *"Same four reference actions as Act 4, but now the
+platform knows who's asking. Watch what changes."*
+
+| Step | Who | Prompt | What the audience sees |
+|------|-----|--------|------------------------|
+| 1 | **alice** (analyst) | *"Top 5 specialties by total drug cost"* | Same answer as Act 1. Read tools are open to analyst+. Trace shows `query_metric` with `policy: allow`. |
+| 2 | **alice** | *"Flag NPI \<from-Act-4\> for review, severity low, reason 'routine check'"* | Trace shows a red **[DENIED]** line: *"denied: flag_for_review (severity=low) requires compliance; user has [analyst]"*. The action never executes. |
+| 3 | **alice → logout**, **bob** login (`bob-dev`) | *"Flag NPI \<same\> for review, severity low, reason 'routine check'"* | `action_flag_for_review` succeeds. `action_invocation.actor` row now contains Bob's Keycloak subject UUID — not `agent:claude`. |
+| 4 | **bob** (compliance) | *"Escalate that to severity high"* (i.e. re-flag with `severity=high`) | Trace shows **[DENIED]**: *"severity=high requires senior_compliance; user has [compliance]"*. The escalation gate works. |
+| 5 | **bob → logout**, **carol** login (`carol-dev`) | *"Flag NPI \<same\> for review, severity high, reason 'pattern unusual for specialty'"* | Succeeds. Carol's UUID is now on the invocation. The high-severity gate opens for senior_compliance. |
+| 6 | Anywhere | Open http://localhost:8081/telemetry | New **Denied by policy** summary card is non-zero. Filter `Policy = denied` shows steps 2 and 4 with their full Rego reasons inline. Filter `Actor = <alice-subject>` isolates her trace. |
+
+> **Point to make:** "Three things stayed identical between Acts 4 and 6 —
+> the tool surface, the actions library, the audit log. The only thing
+> that changed is that the policy engine now sits between the LLM and the
+> database, and it can see who's asking. The denial isn't a 500 error in a
+> log file somewhere — it's a first-class chat-trace entry with the exact
+> reason, and it's queryable in the telemetry UI like any other call."
+
+### Optional: same policy, different transport
+
+If Claude Desktop is wired in via MCP (Act 5), the **service-account roles**
+in `MCP_SERVICE_ROLES` determine what *that* transport can do. With
+`MCP_SERVICE_ROLES=compliance` (the dev default), the MCP agent has Bob's
+permissions: it can flag low/medium but not high. Show the same severity=high
+request via Claude Desktop and it gets denied with the same Rego reason as
+step 4 — proving that web chat and MCP share one decision path, not two.
+
+---
+
 ## Closing — the platform tour (~5 minutes)
 
 Open these in order and narrate:
@@ -187,7 +238,12 @@ Open these in order and narrate:
    propagation of changes from Postgres to Neo4j and beyond, with a Kafka
    migration path documented up front."*
 
-6. **[ARCHITECTURE.md](../ARCHITECTURE.md)** — *"The full executive
+6. **[docs/auth-plan.md](auth-plan.md)** — *"How the identity + policy layer
+   in Act 6 is wired: Keycloak issues OIDC tokens, OPA evaluates Rego on
+   every tool call, the decision is cached and logged. Phased delivery
+   doc — useful if you want to lift this pattern into another project."*
+
+7. **[ARCHITECTURE.md](../ARCHITECTURE.md)** — *"The full executive
    briefing if you want to send it to someone who wasn't here."*
 
 ---
