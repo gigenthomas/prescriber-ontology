@@ -55,8 +55,34 @@
       <a href="/actions">Actions log</a>
       <a href="/telemetry">Telemetry</a>
       <a href="/lineage">Lineage</a>
+      <span id="auth-pill"
+            hx-get="/auth/me" hx-trigger="load"
+            hx-swap="innerHTML"
+            style="margin-left:1rem;color:#666;font-size:0.85rem"></span>
     </nav>
   </header>
+
+  <script>
+    // Render the auth pill from /auth/me JSON (HTMX swaps the raw JSON into
+    // the span; this re-renders it as a friendly user + logout link).
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      if (e.target.id !== 'auth-pill') return;
+      try {
+        const j = JSON.parse(e.target.textContent.trim());
+        if (j.authenticated) {
+          const roles = (j.roles || []).join(', ');
+          e.target.innerHTML =
+            '<strong>' + (j.username || j.name) + '</strong>' +
+            (roles ? ' <span style="color:#888">(' + roles + ')</span>' : '') +
+            ' · <a href="/auth/logout">logout</a>';
+        } else {
+          e.target.innerHTML = '<a href="/auth/login">login</a>';
+        }
+      } catch (err) {
+        e.target.textContent = '';   // auth disabled — nothing to render
+      }
+    });
+  </script>
 
   <main>
     <div id="conversation">

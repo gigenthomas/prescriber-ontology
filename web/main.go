@@ -82,6 +82,13 @@ func runHTTP() {
 	buildSystemPrompt()
 	buildTools()
 
+	// Auth + policy. Both are env-driven and safe-when-off: initAuth is a
+	// no-op when AUTH_PROVIDER=none; OPA is only consulted when auth is on.
+	if err := initAuth(ctx); err != nil {
+		log.Fatalf("auth init: %v", err)
+	}
+	initOPA()
+
 	// Events tier: start the in-process consumer goroutine. It owns its own
 	// pgx connection for LISTEN; the rest of the app uses the pool.
 	startConsumers(ctx)
@@ -92,12 +99,20 @@ func runHTTP() {
 		log.Fatalf("parse templates: %v", err)
 	}
 
+	// Public routes (no auth required).
 	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/chat", chatHandler)
-	http.HandleFunc("/actions", actionsHandler)
-	http.HandleFunc("/telemetry", telemetryHandler)
-	http.HandleFunc("/lineage", lineageHandler)
+	http.HandleFunc("/auth/login", authLoginHandler)
+	http.HandleFunc("/auth/callback", authCallbackHandler)
+	http.HandleFunc("/auth/logout", authLogoutHandler)
+	http.HandleFunc("/auth/me", authMeHandler)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+
+	// Protected routes — when AUTH_PROVIDER=keycloak they require login,
+	// when AUTH_PROVIDER=none they pass through unchanged.
+	http.HandleFunc("/chat", requireAuth(chatHandler))
+	http.HandleFunc("/actions", requireAuth(actionsHandler))
+	http.HandleFunc("/telemetry", requireAuth(telemetryHandler))
+	http.HandleFunc("/lineage", requireAuth(lineageHandler))
 
 	addr := getenv("ADDR", ":8080")
 	log.Printf("prescriber bot listening on %s (model=%s, queries=%s, %d queries loaded)",
@@ -661,13 +676,22 @@ func logUsage(u anthropic.Usage) {
 
 func executeTool(ctx context.Context, name, inputJSON string) (string, bool) {
 	rec := startToolCall(ctx, name, inputJSON)
+
+	// Policy gate. When AUTH_PROVIDER=none this returns Allow unconditionally.
+	d := authorizeToolCall(ctx, name, inputJSON)
+	if !d.Allow {
+		msg := "denied by policy: " + d.Reason
+		rec.finishWithPolicy(ctx, msg, true, false, d.Reason)
+		return msg, true
+	}
+
 	out, err := dispatchTool(ctx, name, inputJSON)
 	if err != nil {
 		msg := fmt.Sprintf("error: %v", err)
-		rec.finish(ctx, msg, true)
+		rec.finishWithPolicy(ctx, msg, true, true, d.Reason)
 		return msg, true
 	}
-	rec.finish(ctx, out, false)
+	rec.finishWithPolicy(ctx, out, false, true, d.Reason)
 	return out, false
 }
 

@@ -4,17 +4,21 @@ go 1.23.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.43.0
+	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.43.0
 	github.com/neo4j/neo4j-go-driver/v5 v5.27.0
+	golang.org/x/oauth2 v0.30.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/go-jose/go-jose/v4 v4.0.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

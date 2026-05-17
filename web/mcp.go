@@ -30,6 +30,14 @@ func runMCP() {
 		log.Fatalf("actions: %v", err)
 	}
 
+	// Auth + policy. initAuth is a no-op when AUTH_PROVIDER=none; in MCP
+	// mode an authenticated user is synthesised by mcpDispatch (the
+	// MCP_SERVICE_* env vars).
+	if err := initAuth(ctx); err != nil {
+		log.Fatalf("auth init: %v", err)
+	}
+	initOPA()
+
 	// Events tier: start consumers in MCP mode too. Multiple processes can
 	// each run their own neo4j_reprojector — the cursor ensures they don't
 	// duplicate work (one wins each event via the WHERE last_id < clause).
