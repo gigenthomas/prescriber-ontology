@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -23,6 +24,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 )
 
 //go:embed templates/*.html
@@ -577,10 +581,22 @@ var (
 	botTpl   = template.Must(template.New("b").Parse(`<div class="msg bot">{{.}}</div>`))
 	toolTpl  = template.Must(template.New("t").Parse(`<div class="msg tool">{{.}}</div>`))
 	errorTpl = template.Must(template.New("e").Parse(`<div class="msg error">{{.}}</div>`))
+
+	mdRenderer = goldmark.New(
+		goldmark.WithExtensions(extension.Table, extension.Strikethrough),
+		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
+	)
 )
 
-func renderUser(w http.ResponseWriter, s string)  { userTpl.Execute(w, s) }
-func renderBot(w http.ResponseWriter, s string)   { botTpl.Execute(w, s) }
+func renderUser(w http.ResponseWriter, s string) { userTpl.Execute(w, s) }
+func renderBot(w http.ResponseWriter, s string) {
+	var buf bytes.Buffer
+	if err := mdRenderer.Convert([]byte(s), &buf); err != nil {
+		buf.Reset()
+		buf.WriteString(template.HTMLEscapeString(s))
+	}
+	botTpl.Execute(w, template.HTML(buf.String()))
+}
 func renderTool(w http.ResponseWriter, s string)  { toolTpl.Execute(w, s) }
 func renderError(w http.ResponseWriter, s string) { errorTpl.Execute(w, s) }
 

@@ -69,7 +69,7 @@ def pipeline_run(
         # Set session variable so triggers on entity/relation/entity_state
         # stamp this pipeline_run_id on every change_event row produced inside
         # this transaction. SET (no LOCAL) persists for the connection's life.
-        cur.execute("SET ontology.pipeline_run_id = %s", (str(run_id),))
+        cur.execute("SELECT set_config('ontology.pipeline_run_id', %s, false)", (str(run_id),))
         conn.commit()
 
     run = _PipelineRun(str(run_id))
