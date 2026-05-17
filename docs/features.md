@@ -145,6 +145,27 @@ enables. Group order roughly reflects build order.
 - *"Did any tool fail today, and why?"* — filter status=error, error_msg shown inline
 - *"How many concurrent sessions?"* — distinct sessions card
 
+## 13 · Entity-level lineage
+
+| Feature | Where | What it enables |
+|---|---|---|
+| `pipeline_run` table | [db/postgres/migrations/0005_lineage.sql](../db/postgres/migrations/0005_lineage.sql) | ETL execution log: name, source_id, started/finished, inputs/outputs JSONB, status, commit_sha, actor |
+| `change_event` attribution columns | (same migration) | New `pipeline_run_id` + `action_invocation_id` columns connect every row mutation back to what caused it |
+| Trigger attribution | Updated `emit_change_event` functions | Triggers read per-transaction settings (`ontology.pipeline_run_id`, `ontology.action_invocation_id`) and stamp them on every event row — no insert/update code changes required |
+| Python `pipeline_run` context manager | [src/ontology/lineage.py](../src/ontology/lineage.py) | INSERTs the row, sets the Postgres session variable, UPDATEs to succeeded/failed on exit. Wired into prescriber.load `run()` and project.to_neo4j `project()`. |
+| `entity_lineage` tool | [web/lineage.go](../web/lineage.go) `doEntityLineage` | Joins entity / source / pipeline_run / action_invocation / entity_state / change_event into one structured response |
+| Registered in chatbot + MCP | [web/main.go](../web/main.go) + [web/mcp.go](../web/mcp.go) | Available to the LLM as `entity_lineage(external_id, type, event_limit?)` |
+| Lineage UI page | [web/lineage_ui.go](../web/lineage_ui.go) + [web/templates/lineage.html](../web/templates/lineage.html) | `/lineage` page: identity card, source card, source attrs, current action-driven state, pipeline-runs table, actions table, recent change-event timeline with `caused_by` column |
+| Chat header link | [web/templates/index.html](../web/templates/index.html) | Four-way nav: Chat · Actions log · Telemetry · Lineage |
+
+**Answerable from a single tool call:**
+- *"Where did this entity come from?"* → source dataset + first pipeline_run that produced it
+- *"What's happened to this entity?"* → ordered action history + change_event timeline
+- *"What's its current operational state?"* → entity_state column
+- *"Who caused this specific change event?"* → `caused_by` joins to pipeline_run.name or action_invocation.action_name
+
+**Honest scope:** events written *before* migration 0005 show `(unattributed)` in the caused_by column — the attribution is for events going forward. Column-level lineage (within an attribute) is *not* tracked; row-level (per-entity) is.
+
 ---
 
 ## What's planned but not built
@@ -165,6 +186,8 @@ enables. Group order roughly reflects build order.
 | Streaming LLM responses (SSE) | (no plan doc yet) | Recommended |
 | Slack/webhook telemetry consumer | (composes with §12) | Recommended — subscribes to `tool_call_log` errors or `change_event` for actions, posts elsewhere |
 | Action rate limiting per actor | (composes with §12) | Recommended — token bucket keyed off `tool_call_log.actor` |
+| Column-level lineage (within an attribute) | (composes with §13) | Future — current lineage is row/entity-level only |
+| Backfill attribution for pre-0005 events | (composes with §13) | Won't fix — events from before today are honestly `(unattributed)` |
 | Bulk-load trigger bypass on ETL | [events-plan.md](events-plan.md) | Partial — plan documented, Python helper not yet wired |
 | Kafka transport migration | [events-plan.md](events-plan.md) | Plan only — flip when at least two of the trigger criteria become true |
 
@@ -174,8 +197,9 @@ enables. Group order roughly reflects build order.
 
 - **114,815** entities · **2,679,499** relations (California 2023 only)
 - **5** entity types · **4** relation types · **13** metrics × **7** dimensions × **9** named queries × **4** actions
-- **7** core tools + **N** auto-generated per-action tools exposed to the LLM
+- **8** core tools + **N** auto-generated per-action tools exposed to the LLM
 - **13/13** cross-store consistency checks passing
 - **~3,778** prompt-cached tokens per call after the first; ~10× cheaper on the cached portion
 - **Postgres → Neo4j auto-sync latency: ~1 second** (LISTEN/NOTIFY wake-up + drain)
 - **Every** LLM tool dispatch — chatbot and MCP, read and write — is captured in `tool_call_log` with full timing, params, status, result size
+- **Every** change to entity / relation / entity_state going forward is attributable to a pipeline_run or an action_invocation
