@@ -82,6 +82,10 @@ func runHTTP() {
 	buildSystemPrompt()
 	buildTools()
 
+	// Events tier: start the in-process consumer goroutine. It owns its own
+	// pgx connection for LISTEN; the rest of the app uses the pool.
+	startConsumers(ctx)
+
 	var err error
 	tpl, err = template.ParseFS(templatesFS, "templates/*.html")
 	if err != nil {

@@ -31,6 +31,11 @@ func runMCP() {
 		log.Fatalf("actions: %v", err)
 	}
 
+	// Events tier: start consumers in MCP mode too. Multiple processes can
+	// each run their own neo4j_reprojector — the cursor ensures they don't
+	// duplicate work (one wins each event via the WHERE last_id < clause).
+	startConsumers(ctx)
+
 	s := server.NewMCPServer(
 		"prescriber-ontology",
 		"0.1.0",

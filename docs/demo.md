@@ -224,3 +224,10 @@ answers regardless of which CA prescriber you pick.
 - *"Which oncology drugs have the highest average cost per beneficiary?"* — `avg_cost_per_beneficiary` filtered to `specialty: "Hematology-Oncology"`, grouped by `drug`
 - *"Flag every prescriber in this list of NPIs for review with reason 'Q2 compliance batch'"* — demonstrates batched Actions across many entities
 - *"Show me everything you can do to a Drug."* — surfaces `add_to_watchlist`, `add_note`, and any future Drug-targeted Action without you having to name them
+
+## Neo4j Querirs 
+http://localhost:7474/browser/
+
+MATCH (p:Prescriber {external_id: "1023069424"})
+OPTIONAL MATCH (p)-[r]-(other)
+RETURN p, r, other
