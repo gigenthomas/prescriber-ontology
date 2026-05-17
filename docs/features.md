@@ -128,6 +128,23 @@ enables. Group order roughly reflects build order.
 
 **Known gap:** the Python bulk-load path (`ontology load`) doesn't yet use `SET LOCAL session_replication_role = replica` to bypass triggers during the 2.5M-row COPY, so re-running a full state load will fire 2.5M trigger executions and slow noticeably. Documented in [events-plan.md](events-plan.md); easy follow-up.
 
+## 12 · Tool-call telemetry
+
+| Feature | Where | What it enables |
+|---|---|---|
+| `tool_call_log` table | [db/postgres/migrations/0004_telemetry.sql](../db/postgres/migrations/0004_telemetry.sql) | One row per dispatch: tool_name, params (JSONB), actor, session_id, transport (http or mcp), status (pending/ok/error), invoked_at, finished_at, duration_ms, error_msg, result_size |
+| Context propagation | [web/telemetry.go](../web/telemetry.go) `WithCallContext` | Actor + session + transport flow via context.Context through every dispatch |
+| Best-effort capture | `startToolCall` + `(*callRecord).finish` | Telemetry write failures never block tool execution; failures logged to stderr |
+| Unified dispatch path | [web/telemetry.go](../web/telemetry.go) `mcpDispatch(name)` | Replaces seven per-tool MCP handler functions with one router; chatbot and MCP now share a single `executeTool` → `dispatchTool` path; ~100 lines of duplicate code removed |
+| Telemetry UI | [web/telemetry_ui.go](../web/telemetry_ui.go) + [web/templates/telemetry.html](../web/templates/telemetry.html) | `/telemetry` page with summary cards (total/errors/avg/p95/distinct), 7-day per-tool aggregates, recent-100 with filters by tool/status/actor |
+| Chat header link | [web/templates/index.html](../web/templates/index.html) | Three-way nav: Chat · Actions log · Telemetry |
+
+**Answerable now without leaving the browser:**
+- *"Which tools do agents actually use?"* — per-tool table sorted by call count
+- *"What's our p95 tool latency?"* — summary card
+- *"Did any tool fail today, and why?"* — filter status=error, error_msg shown inline
+- *"How many concurrent sessions?"* — distinct sessions card
+
 ---
 
 ## What's planned but not built
@@ -136,7 +153,6 @@ enables. Group order roughly reflects build order.
 |---|---|---|
 | Eval harness for LLM answer quality | (no plan doc yet) | Recommended |
 | `pgvector` semantic entity resolution | (no plan doc yet) | Recommended |
-| Tool-call telemetry table | (no plan doc yet) | Recommended |
 | Idempotency keys on actions | (no plan doc yet) | Recommended |
 | Batch action invocation | (no plan doc yet) | Recommended |
 | `describe_capability` macro tool | (no plan doc yet) | Recommended |
@@ -147,6 +163,8 @@ enables. Group order roughly reflects build order.
 | Nationwide + multi-year data | (no plan doc yet) | Recommended |
 | Open Payments / NPPES integration | (no plan doc yet) | Recommended |
 | Streaming LLM responses (SSE) | (no plan doc yet) | Recommended |
+| Slack/webhook telemetry consumer | (composes with §12) | Recommended — subscribes to `tool_call_log` errors or `change_event` for actions, posts elsewhere |
+| Action rate limiting per actor | (composes with §12) | Recommended — token bucket keyed off `tool_call_log.actor` |
 | Bulk-load trigger bypass on ETL | [events-plan.md](events-plan.md) | Partial — plan documented, Python helper not yet wired |
 | Kafka transport migration | [events-plan.md](events-plan.md) | Plan only — flip when at least two of the trigger criteria become true |
 
@@ -160,3 +178,4 @@ enables. Group order roughly reflects build order.
 - **13/13** cross-store consistency checks passing
 - **~3,778** prompt-cached tokens per call after the first; ~10× cheaper on the cached portion
 - **Postgres → Neo4j auto-sync latency: ~1 second** (LISTEN/NOTIFY wake-up + drain)
+- **Every** LLM tool dispatch — chatbot and MCP, read and write — is captured in `tool_call_log` with full timing, params, status, result size
