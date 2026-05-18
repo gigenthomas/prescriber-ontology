@@ -528,7 +528,7 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	ctx = WithCallContext(ctx, "agent:claude", sid, "http")
 
-	updated, finalText, toolTrace, err := runAgent(ctx, history)
+	updated, finalText, toolCalls, err := runAgent(ctx, history)
 	if err != nil {
 		log.Printf("agent error: %v", err)
 		renderUser(w, userMsg)
@@ -537,11 +537,18 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	saveHistory(sid, updated)
 
-	renderUser(w, userMsg)
-	for _, t := range toolTrace {
-		renderTool(w, t)
+	var mermaidDiagram string
+	for _, tc := range toolCalls {
+		if m := toMermaid(tc.Name, tc.Input, tc.Result); m != "" {
+			mermaidDiagram = m
+		}
 	}
-	renderBot(w, finalText)
+
+	renderUser(w, userMsg)
+	for _, tc := range toolCalls {
+		renderToolCall(w, tc)
+	}
+	renderBot(w, finalText, mermaidDiagram)
 }
 
 func sessionID(w http.ResponseWriter, r *http.Request) string {
@@ -577,9 +584,18 @@ func saveHistory(sid string, h []anthropic.MessageParam) {
 // ── Rendering ───────────────────────────────────────────────────────────────
 
 var (
-	userTpl  = template.Must(template.New("u").Parse(`<div class="msg user">{{.}}</div>`))
-	botTpl   = template.Must(template.New("b").Parse(`<div class="msg bot">{{.}}</div>`))
-	toolTpl  = template.Must(template.New("t").Parse(`<div class="msg tool">{{.}}</div>`))
+	userTpl = template.Must(template.New("u").Parse(`<div class="msg user">{{.}}</div>`))
+	botTpl  = template.Must(template.New("b").Parse(
+		`<div class="msg bot"{{if .Mermaid}} data-mermaid="{{.Mermaid}}"{{end}}>{{.Content}}` +
+			`{{if .Mermaid}}<button class="graph-btn" onclick="showResultGraph(this)">📊 View as Graph</button>{{end}}</div>`))
+	toolCallTpl = template.Must(template.New("tc").Parse(
+		`<details class="msg tool-call">` +
+			`<summary><span class="triple-strip">{{.Strip}}</span>` +
+			`{{if gt .Count 0}}<span class="tool-count"> · {{.Count}} results</span>{{end}}</summary>` +
+			`<div class="tool-detail">` +
+			`<div class="tool-params"><div class="tool-label">{{.Name}}</div><pre>{{.Input}}</pre></div>` +
+			`<div class="tool-result"><pre>{{.Result}}</pre></div>` +
+			`</div></details>`))
 	errorTpl = template.Must(template.New("e").Parse(`<div class="msg error">{{.}}</div>`))
 
 	mdRenderer = goldmark.New(
@@ -588,22 +604,55 @@ var (
 	)
 )
 
+type botMsgView struct {
+	Content template.HTML
+	Mermaid string
+}
+
+type toolCallView struct {
+	Name   string
+	Input  string
+	Result string
+	Strip  template.HTML
+	Count  int
+}
+
 func renderUser(w http.ResponseWriter, s string) { userTpl.Execute(w, s) }
-func renderBot(w http.ResponseWriter, s string) {
+
+func renderBot(w http.ResponseWriter, s, mermaidDiagram string) {
 	var buf bytes.Buffer
 	if err := mdRenderer.Convert([]byte(s), &buf); err != nil {
 		buf.Reset()
 		buf.WriteString(template.HTMLEscapeString(s))
 	}
-	botTpl.Execute(w, template.HTML(buf.String()))
+	botTpl.Execute(w, botMsgView{
+		Content: template.HTML(buf.String()),
+		Mermaid: mermaidDiagram,
+	})
 }
-func renderTool(w http.ResponseWriter, s string)  { toolTpl.Execute(w, s) }
+
+func renderToolCall(w http.ResponseWriter, tc toolCall) {
+	toolCallTpl.Execute(w, toolCallView{
+		Name:   tc.Name,
+		Input:  tc.Input,
+		Result: tc.Result,
+		Strip:  tripleStrip(tc.Name, tc.Input),
+		Count:  resultCount(tc.Result),
+	})
+}
+
 func renderError(w http.ResponseWriter, s string) { errorTpl.Execute(w, s) }
 
 // ── Agent loop ──────────────────────────────────────────────────────────────
 
-func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthropic.MessageParam, string, []string, error) {
-	var toolTrace []string
+type toolCall struct {
+	Name   string
+	Input  string
+	Result string
+}
+
+func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthropic.MessageParam, string, []toolCall, error) {
+	var toolCalls []toolCall
 
 	for round := 0; round < maxToolRounds; round++ {
 		resp, err := anthropicClient.Messages.New(ctx, anthropic.MessageNewParams{
@@ -621,7 +670,7 @@ func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthrop
 			Messages: messages,
 		})
 		if err != nil {
-			return messages, "", toolTrace, fmt.Errorf("anthropic: %w", err)
+			return messages, "", toolCalls, fmt.Errorf("anthropic: %w", err)
 		}
 
 		logUsage(resp.Usage)
@@ -640,20 +689,23 @@ func runAgent(ctx context.Context, messages []anthropic.MessageParam) ([]anthrop
 				}
 			case anthropic.ToolUseBlock:
 				inputJSON := string(v.JSON.Input.Raw())
-				toolTrace = append(toolTrace, fmt.Sprintf("→ %s(%s)", v.Name, truncate(inputJSON, 240)))
 				result, isErr := executeTool(ctx, v.Name, inputJSON)
-				toolTrace = append(toolTrace, fmt.Sprintf("← %s", truncate(result, 320)))
+				toolCalls = append(toolCalls, toolCall{
+					Name:   v.Name,
+					Input:  truncate(inputJSON, 240),
+					Result: truncate(result, 320),
+				})
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(v.ID, result, isErr))
 			}
 		}
 
 		if len(toolResults) == 0 {
-			return messages, finalText.String(), toolTrace, nil
+			return messages, finalText.String(), toolCalls, nil
 		}
 		messages = append(messages, anthropic.NewUserMessage(toolResults...))
 	}
 
-	return messages, "(stopped after max tool rounds)", toolTrace, nil
+	return messages, "(stopped after max tool rounds)", toolCalls, nil
 }
 
 func truncate(s string, n int) string {

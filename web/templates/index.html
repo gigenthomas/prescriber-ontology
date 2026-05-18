@@ -5,6 +5,7 @@
   <title>Prescriber Bot</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
@@ -20,19 +21,31 @@
       border-bottom: 1px solid #ddd;
       background: white;
       display: flex; align-items: center; justify-content: space-between;
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
     }
+    body { padding-top: 3.25rem; }
     header h1 { margin: 0; font-size: 1rem; font-weight: 600; }
     header small { color: #888; }
     header nav { margin-left: auto; }
     header nav a { color: #2d6cdf; text-decoration: none; margin-left: 1rem; font-size: 0.9rem; font-weight: 500; }
     header nav a:hover { text-decoration: underline; }
+    header nav button.kg-btn {
+      background: none; border: 1px solid #2d6cdf; color: #2d6cdf;
+      border-radius: 0.4rem; padding: 0.2rem 0.65rem; font-size: 0.85rem;
+      font-weight: 500; cursor: pointer; margin-left: 1rem;
+    }
+    header nav button.kg-btn:hover { background: #eef3fd; }
+
     main { max-width: 820px; margin: 0 auto; padding: 1rem; }
     #conversation { display: flex; flex-direction: column; gap: 0.75rem; padding-bottom: 5.5rem; }
+
+    /* ── Message bubbles ── */
     .msg { padding: 0.65rem 0.9rem; border-radius: 0.75rem; max-width: 88%; line-height: 1.45; }
     .msg.user  { background: #2d6cdf; color: white; align-self: flex-end; white-space: pre-wrap; }
     .msg.bot   { background: white; border: 1px solid #e3e3e3; align-self: flex-start; }
-    .msg.tool  { background: #f3f0e7; border: 1px solid #e6e0cc; color: #6c5a1f; align-self: flex-start; font-family: ui-monospace, monospace; font-size: 0.8rem; white-space: pre-wrap; }
     .msg.error { background: #fdecea; border: 1px solid #f5c2c0; color: #8b1a14; align-self: flex-start; }
+
+    /* ── Bot markdown styles ── */
     .msg.bot p { margin: 0 0 0.5rem; }
     .msg.bot p:last-child { margin-bottom: 0; }
     .msg.bot ul, .msg.bot ol { margin: 0 0 0.5rem 1.25rem; padding: 0; }
@@ -46,6 +59,110 @@
     .msg.bot h1, .msg.bot h2, .msg.bot h3 { margin: 0.6rem 0 0.3rem; font-size: 1rem; }
     .msg.bot strong { font-weight: 600; }
     .msg.bot blockquote { margin: 0 0 0.5rem; padding-left: 0.75rem; border-left: 3px solid #ccc; color: #555; }
+
+    /* ── "View as Graph" button inside bot bubble ── */
+    .graph-btn {
+      display: inline-block; margin-top: 0.6rem;
+      background: none; border: 1px solid #2a9d5c; color: #2a9d5c;
+      border-radius: 0.4rem; padding: 0.2rem 0.6rem;
+      font-size: 0.8rem; cursor: pointer;
+    }
+    .graph-btn:hover { background: #eef8f2; }
+
+    /* ── Tool call collapsible ── */
+    details.tool-call {
+      align-self: flex-start; max-width: 88%;
+      border-left: 3px solid #d4a017; border-radius: 0.5rem;
+      background: #fdfaf3; font-size: 0.82rem;
+      overflow: hidden;
+    }
+    details.tool-call summary {
+      padding: 0.45rem 0.75rem; cursor: pointer; list-style: none;
+      display: flex; align-items: center; gap: 0.4rem;
+      user-select: none; color: #5a4a1a;
+    }
+    details.tool-call summary::-webkit-details-marker { display: none; }
+    details.tool-call summary::before {
+      content: "▶"; font-size: 0.65rem; transition: transform 0.15s; flex-shrink: 0;
+    }
+    details.tool-call[open] summary::before { transform: rotate(90deg); }
+    .triple-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 0.1rem; }
+    .entity-chip {
+      display: inline-flex; align-items: center; gap: 0.2rem;
+      padding: 0.15rem 0.5rem; border-radius: 999px;
+      font-size: 0.78rem; font-weight: 600; color: white; white-space: nowrap;
+    }
+    .triple-arrow { color: #888; font-size: 0.8rem; }
+    .triple-rel {
+      background: #f0ede4; color: #5a4a1a; border: 1px solid #ddd;
+      padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem;
+      font-style: italic; white-space: nowrap;
+    }
+    .triple-label {
+      background: #eee; color: #555; padding: 0.15rem 0.5rem;
+      border-radius: 4px; font-size: 0.78rem;
+    }
+    .tool-count { color: #888; font-size: 0.78rem; white-space: nowrap; }
+    .tool-detail {
+      display: grid; grid-template-columns: 1fr 2fr;
+      gap: 0; border-top: 1px solid #ece6d0;
+    }
+    .tool-params, .tool-result {
+      padding: 0.5rem 0.75rem; overflow: hidden;
+    }
+    .tool-params { border-right: 1px solid #ece6d0; }
+    .tool-label { font-weight: 600; color: #5a4a1a; margin-bottom: 0.3rem; }
+    .tool-detail pre {
+      margin: 0; font-family: ui-monospace, monospace; font-size: 0.75rem;
+      white-space: pre-wrap; word-break: break-all; color: #3a3a3a;
+      max-height: 120px; overflow-y: auto;
+    }
+
+    /* ── Modal overlay ── */
+    .modal-backdrop {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45); z-index: 100;
+      align-items: center; justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-box {
+      background: white; border-radius: 0.75rem;
+      width: min(760px, 94vw); max-height: 85vh;
+      display: flex; flex-direction: column;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.2);
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1rem; border-bottom: 1px solid #eee;
+    }
+    .modal-header h2 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+    .modal-close {
+      background: none; border: none; font-size: 1.2rem; cursor: pointer;
+      color: #888; padding: 0 0.3rem; line-height: 1;
+    }
+    .modal-tabs { display: flex; gap: 0; border-bottom: 1px solid #eee; }
+    .tab-btn {
+      background: none; border: none; border-bottom: 2px solid transparent;
+      padding: 0.6rem 1.1rem; font-size: 0.88rem; cursor: pointer; color: #666;
+    }
+    .tab-btn.active { color: #2d6cdf; border-bottom-color: #2d6cdf; font-weight: 600; }
+    .tab-panel { display: none; padding: 1rem; overflow-y: auto; flex: 1; }
+    .tab-panel.active { display: block; }
+    .diagram-wrap { display: flex; justify-content: center; overflow-x: auto; }
+    .diagram-wrap svg { max-width: 100%; height: auto; }
+    .explainer {
+      margin-top: 1rem; padding: 0.85rem 1rem;
+      background: #f7f9ff; border-left: 3px solid #2d6cdf;
+      border-radius: 0 0.4rem 0.4rem 0; font-size: 0.88rem; line-height: 1.6; color: #2a2a2a;
+    }
+    .explainer strong { color: #1a1a1a; }
+    .stat-chips { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.6rem; }
+    .stat-chip {
+      background: #eef3fd; color: #2d4a8a; border-radius: 999px;
+      padding: 0.2rem 0.7rem; font-size: 0.8rem; font-weight: 600;
+    }
+
+    /* ── Input form ── */
     form {
       position: fixed; bottom: 0; left: 0; right: 0;
       padding: 0.75rem 1rem; background: white; border-top: 1px solid #ddd;
@@ -65,11 +182,49 @@
     <h1>Prescriber Bot</h1>
     <small>CMS Part D Prescribers · CA · 2023</small>
     <nav>
+      <button class="kg-btn" onclick="openSchemaModal()">🕸 Knowledge Graph</button>
       <a href="/actions">Actions log</a>
       <a href="/telemetry">Telemetry</a>
       <a href="/lineage">Lineage</a>
     </nav>
   </header>
+
+  <!-- Modal -->
+  <div id="graph-modal" class="modal-backdrop" onclick="if(event.target===this)closeModal()">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2 id="modal-title">Knowledge Graph</h2>
+        <button class="modal-close" onclick="closeModal()">×</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="tab-btn active" id="tab-schema-btn" onclick="switchTab('schema')">Schema</button>
+        <button class="tab-btn" id="tab-explainer-btn" onclick="switchTab('explainer')">What is this?</button>
+        <button class="tab-btn" id="tab-result-btn" onclick="switchTab('result')" style="display:none">Result Graph</button>
+      </div>
+      <div id="tab-schema" class="tab-panel active">
+        <div id="schema-diagram" class="diagram-wrap"></div>
+      </div>
+      <div id="tab-explainer" class="tab-panel">
+        <div class="explainer">
+          <p>A <strong>knowledge graph</strong> stores facts as <strong>nodes</strong> (things) and <strong>edges</strong> (relationships between things).</p>
+          <p>This graph covers California's Medicare Part D prescribers in 2023.</p>
+          <div class="stat-chips">
+            <span class="stat-chip">🧑‍⚕️ 110,430 Prescribers</span>
+            <span class="stat-chip">💊 2,412 Drug brands</span>
+            <span class="stat-chip">🧪 897 Generic substances</span>
+            <span class="stat-chip">🏥 130 Specialties</span>
+            <span class="stat-chip">📍 946 Cities</span>
+            <span class="stat-chip">🔗 2,679,499 Relationships</span>
+          </div>
+          <p style="margin-top:0.8rem">When you ask <em>"who prescribes Eliquis the most?"</em> the system traverses the graph along the <strong>:prescribed</strong> edge — starting at all Prescriber nodes, following edges to the Eliquis Drug node, and summing claim counts.</p>
+          <p>Every number in an answer is sourced directly from that traversal. Nothing is inferred or estimated.</p>
+        </div>
+      </div>
+      <div id="tab-result" class="tab-panel">
+        <div id="result-diagram" class="diagram-wrap"></div>
+      </div>
+    </div>
+  </div>
 
   <main>
     <div id="conversation">
@@ -94,5 +249,73 @@
       </div>
     </form>
   </main>
+
+  <script>
+    mermaid.initialize({ startOnLoad: false, theme: 'base', securityLevel: 'loose',
+      themeVariables: { fontSize: '13px' } });
+
+    const schemaDiagram = `graph LR
+  P(["🧑‍⚕️ Prescriber"]):::prescriber -->|"prescribed"| D(["💊 Drug"]):::drug
+  D -->|"generic_of"| G(["🧪 Generic"]):::generic
+  P -->|"has_specialty"| S(["🏥 Specialty"]):::specialty
+  P -->|"practices_in"| C(["📍 City"]):::city
+  classDef prescriber fill:#2d6cdf,color:#fff,stroke:none
+  classDef drug fill:#2a9d5c,color:#fff,stroke:none
+  classDef generic fill:#1a8a8a,color:#fff,stroke:none
+  classDef specialty fill:#e07b2a,color:#fff,stroke:none
+  classDef city fill:#6b7280,color:#fff,stroke:none`;
+
+    let schemaRendered = false;
+
+    async function renderDiagram(containerId, diagram) {
+      try {
+        const id = 'mermaid-' + containerId + '-' + Date.now();
+        const { svg } = await mermaid.render(id, diagram);
+        document.getElementById(containerId).innerHTML = svg;
+      } catch(e) {
+        document.getElementById(containerId).innerHTML =
+          '<p style="color:#888;font-size:0.85rem">Could not render diagram.</p>';
+      }
+    }
+
+    async function openSchemaModal() {
+      document.getElementById('tab-result-btn').style.display = 'none';
+      document.getElementById('modal-title').textContent = 'Knowledge Graph';
+      switchTab('schema');
+      document.getElementById('graph-modal').classList.add('open');
+      if (!schemaRendered) {
+        await renderDiagram('schema-diagram', schemaDiagram);
+        schemaRendered = true;
+      }
+    }
+
+    async function showResultGraph(btn) {
+      const diagram = btn.closest('.msg.bot').dataset.mermaid;
+      if (!diagram) return;
+      document.getElementById('tab-result-btn').style.display = '';
+      document.getElementById('modal-title').textContent = 'Result Graph';
+      switchTab('result');
+      document.getElementById('graph-modal').classList.add('open');
+      await renderDiagram('result-diagram', diagram);
+      if (!schemaRendered) {
+        await renderDiagram('schema-diagram', schemaDiagram);
+        schemaRendered = true;
+      }
+    }
+
+    function closeModal() {
+      document.getElementById('graph-modal').classList.remove('open');
+    }
+
+    function switchTab(name) {
+      ['schema','explainer','result'].forEach(t => {
+        document.getElementById('tab-' + t).classList.toggle('active', t === name);
+        const btn = document.getElementById('tab-' + t + '-btn');
+        if (btn) btn.classList.toggle('active', t === name);
+      });
+    }
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+  </script>
 </body>
 </html>
