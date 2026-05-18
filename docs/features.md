@@ -101,13 +101,14 @@ enables. Group order roughly reflects build order.
 | [docs/demo.md](demo.md) | Demo presenters | 5-act demo script, preflight, prompts that consistently land well, cleanup |
 | [docs/actions-plan.md](actions-plan.md) | Implementers | Pre-built Actions-on-Objects spec (now built — historical reference) |
 | [docs/events-plan.md](events-plan.md) | Implementers | LISTEN/NOTIFY events tier with documented Kafka migration path |
+| [docs/auth-plan.md](auth-plan.md) | Implementers | Keycloak OIDC + OPA Rego integration plan — phased delivery, decisions, risks |
 
 ## 10 · Operational tooling
 
 | Feature | Where | What it enables |
 |---|---|---|
 | `ontology` Typer CLI | [src/ontology/cli.py](../src/ontology/cli.py) | init, reset, fetch, load, project, verify, stats, list-queries, query subcommands |
-| Docker Compose stack | [docker-compose.yml](../docker-compose.yml) | Postgres 16 + Neo4j 5 (with APOC) with healthchecks and persistent volumes |
+| Docker Compose stack | [docker-compose.yml](../docker-compose.yml) | Postgres 16 (pgvector) + Neo4j 5 (APOC) + Keycloak 26 + OPA, all healthcheck-gated with persistent volumes |
 | `.env.example` | Repo root | Documents every config knob |
 | Healthcheck endpoint | `GET /healthz` | Currently returns "ok"; basis for richer DB-ping check |
 | Reset command | `ontology reset --yes` | Wipes both stores while preserving schema and constraints |
@@ -201,6 +202,40 @@ enables. Group order roughly reflects build order.
 
 **Smoke-tested:** same key + same params → identical `invocation_id`, `idempotent_replay: true`, no new `action_invocation` row in Postgres. No key → fresh invocation every call (previous behavior preserved).
 
+## 16 · Identity + policy (Keycloak OIDC + OPA Rego)
+
+Optional, opt-in via `AUTH_PROVIDER=keycloak`. When disabled, every prior
+section behaves exactly as before — anonymous local-dev UX is preserved.
+
+| Feature | Where | What it enables |
+|---|---|---|
+| Keycloak realm export | [auth/keycloak/realms/ontology-dev-realm.json](../auth/keycloak/realms/ontology-dev-realm.json) | Curated realm with 4 dev users (alice/bob/carol/dave), 5 roles (analyst, compliance, senior_compliance, admin, viewer), 2 OIDC clients (`ontology-web` public, `ontology-mcp` confidential). `--import-realm` on first boot. |
+| Keycloak container | [docker-compose.yml](../docker-compose.yml) | Quay `keycloak:26` running on `:8180`. Healthcheck-gated. |
+| OPA container | [docker-compose.yml](../docker-compose.yml) | `openpolicyagent/opa:latest` on `:8181` with policy files mounted read-only. Healthcheck-gated. |
+| Reference policy library | [auth/policies/](../auth/policies/) | Three Rego files: `helpers.rego` (role-set predicates), `tools.rego` (per-tool allow rules), `actions.rego` (per-action rules incl. severity gate). All v1 syntax, deny-by-default, paired allow + reason bodies for auditability. |
+| OIDC login flow | [web/auth.go](../web/auth.go) | Auth-code flow with state token, ID-token verification via `go-oidc/v3`, in-memory session store keyed by `ontology_session` cookie, end-session-aware logout. HTMX-aware redirect (sets `HX-Redirect` on XHR). |
+| OPA HTTP client | [web/opa.go](../web/opa.go) | `Decide(tool, args)` returns `(allow, reason)`. LRU cache (sha256-keyed) with 30s TTL via `hashicorp/golang-lru/v2`. |
+| Tool-call gate | [web/main.go](../web/main.go) `dispatchTool` + [web/telemetry.go](../web/telemetry.go) `finishWithPolicy` | OPA consulted before every tool/action runs. Denied calls never reach the DB; `opa_allow=false` + `opa_reason` logged. Chat trace gets `[DENIED]` prefix with red border. |
+| MCP service account | [web/telemetry.go](../web/telemetry.go) `mcpServiceAccountUser` | Synthetic identity for MCP transport when auth is enabled. Roles configurable via `MCP_SERVICE_ROLES` (default `compliance,analyst,viewer`). Same OPA decision path as the web UI. |
+| `tool_call_log.opa_allow` / `opa_reason` | [db/postgres/migrations/0008_auth.sql](../db/postgres/migrations/0008_auth.sql) | Policy decision captured alongside every dispatch. NULL on rows from before phase 2 (treated as "no policy engine consulted"). Partial index on denied rows. |
+| `user_cache` materializer | [db/postgres/migrations/0008_auth.sql](../db/postgres/migrations/0008_auth.sql) + [web/auth.go](../web/auth.go) | Subject UUID → name/email/roles, upserted on login and refreshed lazily (1-hour TTL). Catches Keycloak role changes without forcing re-login. |
+| Display names in audit UIs | [web/telemetry_ui.go](../web/telemetry_ui.go) `actorDisplayExpr` + [web/actions_ui.go](../web/actions_ui.go) | Both `/telemetry` and `/actions` JOIN `user_cache` to render real names instead of bare subject UUIDs. CASE expression also handles `agent:claude` / `agent:mcp` / MCP service-account synthetic IDs with hand-written labels. |
+| Telemetry policy column | [web/telemetry_ui.go](../web/telemetry_ui.go) + [web/templates/telemetry.html](../web/templates/telemetry.html) | "Denied by policy" summary card, allow/deny filter dropdown, opa_reason inline per row. Actor filter populates dynamically from observed actors. |
+| Auth pill in chat header | [web/templates/index.html](../web/templates/index.html) | `hx-get /auth/me` renders `username (roles) · logout` once authenticated, `login` link otherwise. Hides itself cleanly when auth is disabled. |
+
+**Trust-boundary outcome:**
+- Every tool dispatch — chat or MCP — is evaluated by the same Rego policy with the same `(actor, role, tool, args)` input shape.
+- Denied calls are first-class trace entries with a human-readable reason, not opaque 500s.
+- The actor on every audit row is a Keycloak subject UUID (real user) or a synthetic UUID (service account); display names always resolve via `user_cache`.
+- Disabling auth (`AUTH_PROVIDER=none`, the default) reverts every UI surface to anonymous-mode strings — no migration required.
+
+**Verification:** four canonical role cases pass end-to-end via the MCP service-account and the OIDC web flow — analyst denied (no compliance role), compliance allowed-low + denied-high, senior_compliance allowed-high. Full walkthrough in [docs/demo.md](demo.md) appendix.
+
+**Reference docs:**
+- Implementation phasing: [docs/auth-plan.md](auth-plan.md)
+- Demo Act 6: [docs/demo.md](demo.md#act-6--every-call-is-gated-by-policy-optional-auth-mode-only)
+- Self-check protocol: [docs/demo.md](demo.md#appendix-auth-v1-verification-walkthrough)
+
 ---
 
 ## What's planned but not built
@@ -241,3 +276,5 @@ enables. Group order roughly reflects build order.
 - **1,536-dim** OpenAI embeddings per entity, HNSW-indexed for cosine similarity search — ~$0.10 to backfill 114k entities
 - **Every action** can be retried safely by passing an optional `idempotency_key` UUID
 - **Every** change to entity / relation / entity_state going forward is attributable to a pipeline_run or an action_invocation
+- **Every tool dispatch** under `AUTH_PROVIDER=keycloak` carries an OPA decision (`opa_allow` + `opa_reason`) recorded alongside its `tool_call_log` row; cache hit-rate >95% in steady state (30s TTL on `(user.sub, tool, params hash)`)
+- **4 dev users · 5 roles · 2 OIDC clients** in the bundled realm; deny-by-default Rego with paired allow + reason bodies
