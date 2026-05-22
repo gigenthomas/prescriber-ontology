@@ -23,7 +23,8 @@ import (
 
 type authConfig struct {
 	Provider     string // "keycloak" | "none"
-	IssuerURL    string
+	IssuerURL    string // what the JWT's iss claim is expected to be — must match Keycloak's KC_HOSTNAME
+	DiscoveryURL string // where the bot fetches /.well-known/openid-configuration; defaults to IssuerURL but can differ in docker (compose-internal URL vs browser-facing URL)
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
@@ -59,9 +60,11 @@ type AuthenticatedUser struct {
 }
 
 func loadAuthConfig() {
+	issuer := getenv("KEYCLOAK_ISSUER_URL", "http://localhost:8180/realms/ontology-dev")
 	authCfg = authConfig{
 		Provider:     getenv("AUTH_PROVIDER", "none"),
-		IssuerURL:    getenv("KEYCLOAK_ISSUER_URL", "http://localhost:8180/realms/ontology-dev"),
+		IssuerURL:    issuer,
+		DiscoveryURL: getenv("KEYCLOAK_DISCOVERY_URL", issuer),
 		ClientID:     getenv("KEYCLOAK_CLIENT_ID", "ontology-web"),
 		ClientSecret: getenv("KEYCLOAK_CLIENT_SECRET", ""), // public client → empty
 		RedirectURL:  getenv("KEYCLOAK_REDIRECT_URL", "http://localhost:8081/auth/callback"),
@@ -82,21 +85,53 @@ func initAuth(ctx context.Context) error {
 		return nil
 	}
 
-	provider, err := oidc.NewProvider(ctx, authCfg.IssuerURL)
+	// When the bot reaches Keycloak at a different URL than the browser does
+	// (the docker case — bot uses http://keycloak:8080, browser uses
+	// http://localhost:8180), three things have to be rewired:
+	//   1. Discovery URL ≠ issuer claim in metadata. Use InsecureIssuerURLContext
+	//      so go-oidc accepts the mismatch.
+	//   2. OAuth2 endpoint: browser hits AuthURL, bot hits TokenURL. They have
+	//      to be different URLs.
+	//   3. JWKS fetch from the bot must go via the compose-internal URL, not
+	//      the localhost:8180 URL that's baked into Keycloak's metadata.
+	// When DiscoveryURL == IssuerURL (the host-launched case) every URL is
+	// the same and the metadata-derived endpoints are correct as-is.
+	split := authCfg.DiscoveryURL != authCfg.IssuerURL
+	discoveryCtx := ctx
+	if split {
+		discoveryCtx = oidc.InsecureIssuerURLContext(ctx, authCfg.IssuerURL)
+	}
+	provider, err := oidc.NewProvider(discoveryCtx, authCfg.DiscoveryURL)
 	if err != nil {
-		return fmt.Errorf("oidc discovery (%s): %w", authCfg.IssuerURL, err)
+		return fmt.Errorf("oidc discovery (%s): %w", authCfg.DiscoveryURL, err)
 	}
 	oidcProvider = provider
+
+	endpoint := provider.Endpoint()
+	if split {
+		endpoint = oauth2.Endpoint{
+			AuthURL:  authCfg.IssuerURL + "/protocol/openid-connect/auth",      // browser-facing
+			TokenURL: authCfg.DiscoveryURL + "/protocol/openid-connect/token",  // bot-to-keycloak
+		}
+	}
 	oauthConfig = oauth2.Config{
 		ClientID:     authCfg.ClientID,
 		ClientSecret: authCfg.ClientSecret,
 		RedirectURL:  authCfg.RedirectURL,
-		Endpoint:     provider.Endpoint(),
+		Endpoint:     endpoint,
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
-	oidcVerifier = provider.Verifier(&oidc.Config{ClientID: authCfg.ClientID})
+
+	if split {
+		// JWKS lives on Keycloak; bot must fetch it via the compose-internal URL.
+		keySet := oidc.NewRemoteKeySet(ctx, authCfg.DiscoveryURL+"/protocol/openid-connect/certs")
+		oidcVerifier = oidc.NewVerifier(authCfg.IssuerURL, keySet, &oidc.Config{ClientID: authCfg.ClientID})
+	} else {
+		oidcVerifier = provider.Verifier(&oidc.Config{ClientID: authCfg.ClientID})
+	}
 	authInitialized = true
-	log.Printf("auth: provider=keycloak issuer=%s client=%s", authCfg.IssuerURL, authCfg.ClientID)
+	log.Printf("auth: provider=keycloak issuer=%s discovery=%s client=%s",
+		authCfg.IssuerURL, authCfg.DiscoveryURL, authCfg.ClientID)
 
 	// Janitor goroutine: prune pending-state map every minute.
 	go func() {

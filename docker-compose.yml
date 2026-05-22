@@ -90,3 +90,57 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  # ─── Chatbot (auth + compliance role for MCP) ───────────────────────────
+  #
+  # The same prescriber-bot binary the user normally runs in PowerShell,
+  # packaged as a service that boots with the rest of the stack. Reaches
+  # postgres / neo4j / keycloak / opa via the compose network, while still
+  # publishing on host port 8081 so the browser can hit it at
+  # http://localhost:8081/. AUTH_PROVIDER=keycloak by default; flip this
+  # to none and remove the KEYCLOAK_* / OPA_* / MCP_SERVICE_ROLES env if
+  # you want anonymous mode.
+  #
+  # The bot needs ANTHROPIC_API_KEY at runtime — drop it in the host's
+  # .env (already gitignored) and compose will pass it through.
+  bot:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      neo4j:    { condition: service_healthy }
+      keycloak: { condition: service_healthy }
+      opa:      { condition: service_healthy }
+    environment:
+      ADDR: ":8080"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-ontology}
+      POSTGRES_USER: ${POSTGRES_USER:-ontology}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ontology}
+
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-ontology-dev}
+
+      # Auth (Keycloak + OPA). Discovery URL is compose-internal so the
+      # bot can reach Keycloak from inside the network; issuer URL stays
+      # browser-facing so JWT iss claims match what Keycloak announces.
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-keycloak}
+      KEYCLOAK_ISSUER_URL: ${KEYCLOAK_ISSUER_URL:-http://localhost:8180/realms/ontology-dev}
+      KEYCLOAK_DISCOVERY_URL: ${KEYCLOAK_DISCOVERY_URL:-http://keycloak:8080/realms/ontology-dev}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-ontology-web}
+      KEYCLOAK_REDIRECT_URL: ${KEYCLOAK_REDIRECT_URL:-http://localhost:8081/auth/callback}
+      OPA_URL: http://opa:8181
+
+      # MCP service-account identity used when MCP traffic hits this bot.
+      MCP_SERVICE_ROLES: ${MCP_SERVICE_ROLES:-compliance}
+      MCP_SERVICE_SUB: ${MCP_SERVICE_SUB:-00000000-0000-0000-0000-00000000mcp1}
+      MCP_SERVICE_USERNAME: ${MCP_SERVICE_USERNAME:-mcp-service}
+    ports:
+      - "${BOT_PORT:-8081}:8080"
+    restart: unless-stopped
