@@ -537,7 +537,11 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
-	ctx = WithCallContext(ctx, "agent:claude", sid, "http")
+	actor := "agent:claude"
+	if u := userFromCtx(r.Context()); u != nil {
+		actor = u.Subject
+	}
+	ctx = WithCallContext(ctx, actor, sid, "http")
 
 	updated, finalText, toolTrace, err := runAgent(ctx, history)
 	if err != nil {
